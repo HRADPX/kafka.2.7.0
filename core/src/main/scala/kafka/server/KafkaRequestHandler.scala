@@ -56,6 +56,7 @@ class KafkaRequestHandler(id: Int,
       // time should be discounted by # threads.
       val startSelectTime = time.nanoseconds
 
+      // 获取 request 对象，这是 Processor 线程处理请求时存储到 requestChannel 对象的队列中的...
       val req = requestChannel.receiveRequest(300)
       val endTime = time.nanoseconds
       val idleTime = endTime - startSelectTime
@@ -71,6 +72,7 @@ class KafkaRequestHandler(id: Int,
           try {
             request.requestDequeueTimeNanos = endTime
             trace(s"Kafka request handler $id on broker $brokerId handling request $request")
+            // 实际的处理逻辑在这里
             apis.handle(request)
           } catch {
             case e: FatalExitError =>
@@ -112,6 +114,7 @@ class KafkaRequestHandlerPool(val brokerId: Int,
   this.logIdent = "[" + logAndThreadNamePrefix + " Kafka Request Handler on Broker " + brokerId + "], "
   val runnables = new mutable.ArrayBuffer[KafkaRequestHandler](numThreads)
   for (i <- 0 until numThreads) {
+    // 默认启动 8 个线程
     createHandler(i)
   }
 

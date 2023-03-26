@@ -180,7 +180,7 @@ final class ClusterConnectionStates {
         } else {
             resetConnectionSetupTimeout(nodeState);
         }
-        // 修改为未连接，下次发送的时候会判断是否可以发送消息，如果是未连接,会在下次发送时尝试重新建立连接....
+        // 修改为未连接，下次发送的时候会判断是否可以发送消息（连接是否建立），如果是未连接,会在下次发送时尝试重新建立连接....
         nodeState.state = ConnectionState.DISCONNECTED;
     }
 

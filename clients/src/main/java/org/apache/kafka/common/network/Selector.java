@@ -327,6 +327,7 @@ public class Selector implements Selectable, AutoCloseable {
      */
     public void register(String id, SocketChannel socketChannel) throws IOException {
         ensureNotRegistered(id);
+        // 向 Selector 注册 OP_READ 事件
         registerChannel(id, socketChannel, SelectionKey.OP_READ);
         this.sensors.connectionCreated.record();
         // Default to empty client information as the ApiVersionsRequest is not

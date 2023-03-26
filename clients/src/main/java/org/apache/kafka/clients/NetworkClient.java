@@ -353,6 +353,7 @@ public class NetworkClient implements KafkaClient {
                     request.header.apiKey(), request.request, request.header.correlationId(), nodeId);
 
             if (!request.isInternalRequest) {
+                // 对于长时间没有收到响应的请求，它自己封装了一个响应，这个响应里面没有服务端响应消息，并且 disconnect 状态标识为 true.
                 if (responses != null)
                     responses.add(request.disconnected(now, null));
             } else if (request.header.apiKey() == ApiKeys.METADATA) {
@@ -798,6 +799,7 @@ public class NetworkClient implements KafkaClient {
                 break; // Disconnections in other states are logged at debug level in Selector
         }
 
+        // 自己封装请求返回
         cancelInFlightRequests(nodeId, now, responses);
         metadataUpdater.handleServerDisconnect(now, nodeId, Optional.ofNullable(disconnectState.exception()));
     }
