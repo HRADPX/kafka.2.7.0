@@ -16,6 +16,17 @@
  */
 package org.apache.kafka.clients.producer;
 
+import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
+import static org.apache.kafka.common.config.ConfigDef.Range.between;
+import static org.apache.kafka.common.config.ConfigDef.ValidString.in;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.apache.kafka.clients.ClientDnsLookup;
 import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.producer.internals.DefaultPartitioner;
@@ -27,17 +38,6 @@ import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.SecurityConfig;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.serialization.Serializer;
-
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
-
-import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
-import static org.apache.kafka.common.config.ConfigDef.Range.between;
-import static org.apache.kafka.common.config.ConfigDef.ValidString.in;
 
 /**
  * Configuration for the Kafka Producer. Documentation for these configurations can be found in the <a
@@ -84,6 +84,10 @@ public class ProducerConfig extends AbstractConfig {
                                                  + "buffer of the specified batch size in anticipation of additional records.";
 
     /** <code>acks</code> */
+    // 该参数控制表示生产者发送完消息后的行为。
+    // acks = 0, 生产者发送消息后不关心服务端的响应，不能保证消息是否到达服务端，也不会重试。
+    // acks = 1, 生产者发送消息后 leader 节点完成了消息的存储后，才给生产者发送响应，但是不保证 follower 节点完成同步
+    // acks = -1, 生产者发送消息后，leader 节点和 follower 节点都完成消息存储后，才给生产者发送响应。
     public static final String ACKS_CONFIG = "acks";
     private static final String ACKS_DOC = "The number of acknowledgments the producer requires the leader to have received before considering a request complete. This controls the "
                                            + " durability of records that are sent. The following settings are allowed: "

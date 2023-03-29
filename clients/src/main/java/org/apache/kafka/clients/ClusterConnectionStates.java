@@ -16,27 +16,35 @@
  */
 package org.apache.kafka.clients;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
 import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.utils.ExponentialBackoff;
 import org.apache.kafka.common.utils.LogContext;
 import org.slf4j.Logger;
 
-import java.net.InetAddress;
-import java.net.UnknownHostException;
-import java.util.*;
-import java.util.stream.Collectors;
-
 /**
  * The state of our connection to each node in the cluster.
  *
+ * 维护服务集群节点的连接状态
  */
 final class ClusterConnectionStates {
     final static int RECONNECT_BACKOFF_EXP_BASE = 2;
     final static double RECONNECT_BACKOFF_JITTER = 0.2;
     final static int CONNECTION_SETUP_TIMEOUT_EXP_BASE = 2;
     final static double CONNECTION_SETUP_TIMEOUT_JITTER = 0.2;
+    // 保存主机和连接状态的映射
     private final Map<String, NodeConnectionState> nodeState;
     private final Logger log;
+    // 保存正在连接的主机，集合里的主机都没有完成连接
     private Set<String> connectingNodes;
     private ExponentialBackoff reconnectBackoff;
     private ExponentialBackoff connectionSetupTimeout;
@@ -138,8 +146,11 @@ final class ClusterConnectionStates {
      */
     public void connecting(String id, long now, String host, ClientDnsLookup clientDnsLookup) {
         NodeConnectionState connectionState = nodeState.get(id);
+        // 之前连接过，但是连接断开了...
         if (connectionState != null && connectionState.host().equals(host)) {
+            // 更新连接时间
             connectionState.lastConnectAttemptMs = now;
+            // 此时还没有完成连接，具体的连接操作在 poll 方法中
             connectionState.state = ConnectionState.CONNECTING;
             // Move to next resolved address, or if addresses are exhausted, mark node to be re-resolved
             connectionState.moveToNextAddress();
@@ -151,8 +162,10 @@ final class ClusterConnectionStates {
 
         // Create a new NodeConnectionState if nodeState does not already contain one
         // for the specified id or if the hostname associated with the node id changed.
+        // 没有连接过，如首次向该节点发送消息
         nodeState.put(id, new NodeConnectionState(ConnectionState.CONNECTING, now,
             reconnectBackoff.backoff(0), connectionSetupTimeout.backoff(0), host, clientDnsLookup));
+        // 保存一下正在连接的主机信息
         connectingNodes.add(id);
     }
 

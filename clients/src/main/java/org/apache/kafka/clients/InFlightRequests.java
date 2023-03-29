@@ -156,6 +156,9 @@ final class InFlightRequests {
         }
     }
 
+    /**
+     * 判断已经发送的请求在规定的时间内是否收到服务端响应
+     */
     private Boolean hasExpiredRequest(long now, Deque<NetworkClient.InFlightRequest> deque) {
         for (NetworkClient.InFlightRequest request : deque) {
             long timeSinceSend = Math.max(0, now - request.sendTimeMs);
@@ -170,6 +173,8 @@ final class InFlightRequests {
      *
      * @param now current time in milliseconds
      * @return list of nodes
+     *
+     * 请求超时的服务端节点列表
      */
     public List<String> nodesWithTimedOutRequests(long now) {
         List<String> nodeIds = new ArrayList<>();

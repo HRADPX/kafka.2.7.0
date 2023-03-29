@@ -16,24 +16,6 @@
  */
 package org.apache.kafka.common.network;
 
-import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.MetricName;
-import org.apache.kafka.common.errors.AuthenticationException;
-import org.apache.kafka.common.memory.MemoryPool;
-import org.apache.kafka.common.metrics.Metrics;
-import org.apache.kafka.common.metrics.Sensor;
-import org.apache.kafka.common.metrics.internals.IntGaugeSuite;
-import org.apache.kafka.common.metrics.stats.Avg;
-import org.apache.kafka.common.metrics.stats.CumulativeSum;
-import org.apache.kafka.common.metrics.stats.Max;
-import org.apache.kafka.common.metrics.stats.Meter;
-import org.apache.kafka.common.metrics.stats.SampledStat;
-import org.apache.kafka.common.metrics.stats.WindowedCount;
-import org.apache.kafka.common.utils.LogContext;
-import org.apache.kafka.common.utils.Time;
-import org.apache.kafka.common.utils.Utils;
-import org.slf4j.Logger;
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -54,6 +36,24 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.MetricName;
+import org.apache.kafka.common.errors.AuthenticationException;
+import org.apache.kafka.common.memory.MemoryPool;
+import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.Sensor;
+import org.apache.kafka.common.metrics.internals.IntGaugeSuite;
+import org.apache.kafka.common.metrics.stats.Avg;
+import org.apache.kafka.common.metrics.stats.CumulativeSum;
+import org.apache.kafka.common.metrics.stats.Max;
+import org.apache.kafka.common.metrics.stats.Meter;
+import org.apache.kafka.common.metrics.stats.SampledStat;
+import org.apache.kafka.common.metrics.stats.WindowedCount;
+import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Utils;
+import org.slf4j.Logger;
 
 /**
  * A nioSelector interface for doing non-blocking multi-connection network I/O.
@@ -264,7 +264,7 @@ public class Selector implements Selectable, AutoCloseable {
         try {
             // 设置非阻塞等一些参数
             configureSocketChannel(socketChannel, sendBufferSize, receiveBufferSize);
-            // 连接主机
+            // 连接服务节点主机
             boolean connected = doConnect(socketChannel, address);
             // SocketChannel 向 Selector 上注册一个 OP_CONNECT 事件
             // 并将 SocketChannel 封装成 KafkaChannel，同时把 Key 和 KafkaChannel 关联起来，便于后续使用...
@@ -274,8 +274,8 @@ public class Selector implements Selectable, AutoCloseable {
             if (connected) {
                 // OP_CONNECT won't trigger for immediately connected channels
                 log.debug("Immediately connected to node {}", id);
-                // 立刻连接成功了，需要取消前面注册的 OP_CONNECT 事件
                 immediatelyConnectedKeys.add(key);
+                // 立刻连接成功了，需要取消前面注册的 OP_CONNECT 事件
                 key.interestOps(0);
             }
         } catch (IOException | RuntimeException e) {
@@ -344,6 +344,11 @@ public class Selector implements Selectable, AutoCloseable {
             throw new IllegalStateException("There is already a connection for id " + id + " that is still being closed");
     }
 
+    /**
+     * 这里的封装关系为 SocketChannel + SelectionKey --> TransportLayer --> KafkaChannel
+     * 同时将 KafkaChannel 绑定到 SelectionKey 中，这样后面就可以通过 SelectionKey 获取到 KafkaChannel
+     * 这样就可以实现 SelectionKey -> KafkaChannel 和 KafkaChannel -> SelectionKey
+     */
     protected SelectionKey registerChannel(String id, SocketChannel socketChannel, int interestedOps) throws IOException {
         // 向 Selector 上注册关注的事件
         SelectionKey key = socketChannel.register(nioSelector, interestedOps);
@@ -360,6 +365,7 @@ public class Selector implements Selectable, AutoCloseable {
         try {
             KafkaChannel channel = channelBuilder.buildChannel(id, key, maxReceiveSize, memoryPool,
                 new SelectorChannelMetadataRegistry());
+            // 绑定 KafkaChannel 到 SelectionKey 中
             key.attach(channel);
             return channel;
         } catch (Exception e) {
@@ -405,19 +411,26 @@ public class Selector implements Selectable, AutoCloseable {
     /**
      * Queue the given request for sending in the subsequent {@link #poll(long)} calls
      * @param send The request to send
+     *
+     * 客户端发送的每个 Send 请求，都会被设置到 kafkaChannel 中，如果一个 KafkaChannel 上还有尚未发送的 Send 请求，
+     * 则后面的请求就不能被发送。即客户端发送请求给服务端，在一个 kafkaChannel 中，一次只能发送一个 Send 请求。
+     *
+     * 每次发送 Send 请求都要给 SocketChannel 添加 OP_WRITE（写）事件，这样就可以往 SocketChannel 中写入数据，当 Send 请求发送成功后，
+     * 都要将 OP_WRITE 事件移除。
      */
     public void send(Send send) {
         String connectionId = send.destination();
         // 获取 KafkaChannel，这里的 KafkaChannel 是从 channels 这个 Map 中获取的，
-        // 之前在建立连接成功后，会将主机和 KafkaChannel 的映射保存起来
+        // 之前在建立连接成功后，会将主机信息和 KafkaChannel 的映射保存起来
         KafkaChannel channel = openOrClosingChannelOrFail(connectionId);
         if (closingChannels.containsKey(connectionId)) {
             // ensure notification via `disconnected`, leave channel in the state in which closing was triggered
             this.failedSends.add(connectionId);
         } else {
             try {
-                // 将请求保存到 KafkaChannel 中，并注册一个 OP_WRITE 事件
-                // 这里其实还没有真正发送，因为绑定了 OP_WRITE，数据发送还是在 poll 方法中执行，
+                // 这里其实还没有真正发送，只是将请求保存到 KafkaChannel 中，并注册一个 OP_WRITE 事件，选择器轮询时监听到写事件后，
+                // 会调用 KafkaChannel.write() 方法，将保存在 KafkaChannel 中保存的 Send 发送到传输层的 SocketChannel 中，
+                // 数据发送还是在 poll 方法中执行，
                 channel.setSend(send);
             } catch (Exception e) {
                 // update the state for consistency, the channel will be discarded after `close`
@@ -918,9 +931,12 @@ public class Selector implements Selectable, AutoCloseable {
         if (channel != null) {
             // There is no disconnect notification for local close, but updating
             // channel state here anyway to avoid confusion.
+            // 将 channel 状态设置为 LOCAL_CLOSE
             channel.state(ChannelState.LOCAL_CLOSE);
+            // CloseMode.DISCARD_NO_NOTIFY: 关闭连接并且不发送通知
             close(channel, CloseMode.DISCARD_NO_NOTIFY);
         } else {
+            // 关闭的
             KafkaChannel closingChannel = this.closingChannels.remove(id);
             // Close any closing channel, leave the channel in the state in which closing was triggered
             if (closingChannel != null)
@@ -955,12 +971,17 @@ public class Selector implements Selectable, AutoCloseable {
      *
      * The channel will be added to disconnect list when it is actually closed if `closeMode.notifyDisconnect`
      * is true.
+     *
+     * 如果连接关闭且 closeMode 是 CloseMode.GRACEFUL，未处理的响应和请求会被处理。如果 closeMode 是其他，则连接关闭时不会进行任何出来。
+     *
+     * 如果连接关闭，并且 closeMode 的 notifyDisconnect 为 true，则会将这个连接加到 disconnect 列表里，会在后续通知该连接的断开状态。
      */
     private void close(KafkaChannel channel, CloseMode closeMode) {
         channel.disconnect();
 
         // Ensure that `connected` does not have closed channels. This could happen if `prepare` throws an exception
         // in the `poll` invocation when `finishConnect` succeeds
+        // 从连接数据结构中移除
         connected.remove(channel.id());
 
         // Keep track of closed channels with pending receives so that all received records
@@ -969,12 +990,16 @@ public class Selector implements Selectable, AutoCloseable {
         // handle close(). When the remote end closes its connection, the channel is retained until
         // a send fails or all outstanding receives are processed. Mute state of disconnected channels
         // are tracked to ensure that requests are processed one-by-one by the broker to preserve ordering.
+        // 处理可能没有完成的请求和响应
         if (closeMode == CloseMode.GRACEFUL && maybeReadFromClosingChannel(channel)) {
+            // 添加到关闭的 channel 数据结构中
             closingChannels.put(channel.id(), channel);
             log.debug("Tracking closing connection {} to process outstanding requests", channel.id());
         } else {
+            // 关闭 channel
             doClose(channel, closeMode.notifyDisconnect);
         }
+        // 从 channels 移除该主机（在建立连接后，会将该主机对应的 KafkaChannel 存储到这个数据结构中）
         this.channels.remove(channel.id());
 
         if (delayedClosingChannels != null)
@@ -993,12 +1018,15 @@ public class Selector implements Selectable, AutoCloseable {
         } catch (IOException e) {
             log.error("Exception closing connection to node {}:", channel.id(), e);
         } finally {
+            // 取消绑定
             key.cancel();
+            // 移除绑定的 KafkaChannel
             key.attach(null);
         }
 
         this.sensors.connectionClosed.record();
         this.explicitlyMutedChannels.remove(channel);
+        // 如果要通知连接关闭，则放到这个 disconnected 列表里
         if (notifyDisconnect)
             this.disconnected.put(channel.id(), channel.state());
     }

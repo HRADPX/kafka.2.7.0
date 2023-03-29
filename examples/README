@@ -10,3 +10,15 @@ To run the demo:
    5. Some notes for exactly once demo:
       5.1. The Kafka server has to be on broker version 2.5 or higher.
       5.2. You could also use Intellij to run the example directly by configuring parameters as "Program arguments"
+
+# 1. 配置环境，需要 gradle（6.6） 和 scala 环境，并配置环境变量，如果要启动服务，还需要配置 Zookeeper
+# 2. 拉下代码到 idea，如果是官方源码，还需要先配置下仓库地址，替换为阿里云仓库
+# 3. 找到项目根目录下的 settings.grade 配置文件，添加到 gradle 工程，开始导入依赖
+# 4. 依赖导入结束后，有些版本会有些包无法导入，需要手动执行执行 gradle wrapper, 生成 gradlew 执行文件，如果是 windows 环境，需要将根目录下
+#   的 wrapper.gradle 文件中的最后一行移除 windows 批处理文件的配置给注释掉，不然在 windows 环境下根目录不会生成 gradlew.bat 批处理文件。
+#   这是因为 Kafka 开发不是在 windows 环境，但是是可以在 windows 环境下编译的。
+# 5. 在根目录下执行 ./gradlew assemble -x test 命令，重新编译下，编译成功后源码环境就搭建好了。
+#    Note：1）因为 gradlew 没有配置环境变量，只能在项目根目录下执行。2）可以通过 ./gradlew tasks 查看所有可执行任务名称
+
+# 如何保证消息的不丢失的方式
+# 1. acks 设置为 -1，表示生产者发送完成消息后，只有 leader 节点和所有的 follower 节点都完成存储后，才给客户端发送响应。

@@ -32,6 +32,8 @@ public final class ClientRequest {
     private final String clientId;
     private final long createdTimeMs;
     private final boolean expectResponse;
+    // 请求超时时间，默认是 30s
+    /** @see org.apache.kafka.clients.producer.ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG */
     private final int requestTimeoutMs;
     private final RequestCompletionHandler callback;
 

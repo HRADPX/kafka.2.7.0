@@ -16,12 +16,6 @@
  */
 package org.apache.kafka.common.network;
 
-import org.apache.kafka.common.errors.AuthenticationException;
-import org.apache.kafka.common.errors.SslAuthenticationException;
-import org.apache.kafka.common.memory.MemoryPool;
-import org.apache.kafka.common.security.auth.KafkaPrincipal;
-import org.apache.kafka.common.utils.Utils;
-
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
@@ -30,6 +24,12 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.Optional;
 import java.util.function.Supplier;
+
+import org.apache.kafka.common.errors.AuthenticationException;
+import org.apache.kafka.common.errors.SslAuthenticationException;
+import org.apache.kafka.common.memory.MemoryPool;
+import org.apache.kafka.common.security.auth.KafkaPrincipal;
+import org.apache.kafka.common.utils.Utils;
 
 /**
  * A Kafka connection either existing on a client (which could be a broker in an
@@ -192,12 +192,17 @@ public class KafkaChannel implements AutoCloseable {
         }
     }
 
+    /**
+     * 断开连接
+     */
     public void disconnect() {
+        // 断开连接标识为 true
         disconnected = true;
         if (state == ChannelState.NOT_CONNECTED && remoteAddress != null) {
             //if we captured the remote address we can provide more information
             state = new ChannelState(ChannelState.State.NOT_CONNECTED, remoteAddress.toString());
         }
+        // SelectionKey.cancel()
         transportLayer.disconnect();
     }
 
@@ -372,10 +377,18 @@ public class KafkaChannel implements AutoCloseable {
         return socket.getInetAddress().toString();
     }
 
+    /**
+     * 保存请求到 KafkaChannel 中，并绑定 OP_WRITE 事件，实际并没有发送。
+     * 实际发送是在 poll 方法里，发送完成后，会将 KafkaChannel 里的 send 移除，等待下一个请求，同时也将写事件移除。
+     * @see #maybeCompleteSend()
+     */
     public void setSend(Send send) {
+        // 之前的 Send 还没有发送完成，新的请求不能进来
         if (this.send != null)
             throw new IllegalStateException("Attempt to begin a send operation with prior send operation still in progress, connection id is " + id);
+        // 将请求保存到 KafkaChannel 中
         this.send = send;
+        // 绑定写 OP_WRITE 事件
         this.transportLayer.addInterestOps(SelectionKey.OP_WRITE);
     }
 
@@ -385,6 +398,7 @@ public class KafkaChannel implements AutoCloseable {
             // 完成发送请求，移除 OP_WRITE 事件
             transportLayer.removeInterestOps(SelectionKey.OP_WRITE);
             Send result = send;
+            // send 设置为 null，因为请求是一个一个发送的，下个请求过来时，需要确保上一个请求发送完毕，否则不能发送
             send = null;
             return result;
         }
