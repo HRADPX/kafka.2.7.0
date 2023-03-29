@@ -119,7 +119,9 @@ class KafkaRequestHandlerPool(val brokerId: Int,
   }
 
   def createHandler(id: Int): Unit = synchronized {
+    // KafkaRequestHandler 实现 Runnable 接口
     runnables += new KafkaRequestHandler(id, brokerId, aggregateIdleMeter, threadPoolSize, requestChannel, apis, time)
+    // 启动线程
     KafkaThread.daemon(logAndThreadNamePrefix + "-kafka-request-handler-" + id, runnables(id)).start()
   }
 

@@ -853,7 +853,9 @@ private[kafka] class Processor(val id: Int,
           processNewResponses()
           // 实际处理的请求的方法，和客户端代码复用
           poll()
+          // 处理接收到的客户端请求（元数据拉取、客户端连接建立、客户端发送的请求）
           processCompletedReceives()
+          // 处理服务端发送的响应
           processCompletedSends()
           processDisconnected()
           closeExcessConnections()
@@ -891,6 +893,7 @@ private[kafka] class Processor(val id: Int,
 
   private def processNewResponses(): Unit = {
     var currentResponse: RequestChannel.Response = null
+    // 从 responseQueue 队列中获取服务端要返回给客户端的响应
     while ({currentResponse = dequeueResponse(); currentResponse != null}) {
       val channelId = currentResponse.request.context.connectionId
       try {
@@ -906,6 +909,8 @@ private[kafka] class Processor(val id: Int,
             handleChannelMuteEvent(channelId, ChannelMuteEvent.RESPONSE_SENT)
             tryUnmuteChannel(channelId)
 
+          // 发送响应，但是实际上也没在这里发送消息，只是创建一个 SocketChannel，并注册 OP_WRITE 事件
+          // 复用了客户端的代码
           case response: SendResponse =>
             sendResponse(response, response.responseSend)
           case response: CloseConnectionResponse =>
@@ -942,6 +947,7 @@ private[kafka] class Processor(val id: Int,
     // removed from the Selector after discarding any pending staged receives.
     // `openOrClosingChannel` can be None if the selector closed the connection because it was idle for too long
     if (openOrClosingChannel(connectionId).isDefined) {
+      // NIO api
       selector.send(responseSend)
       inflightResponses += (connectionId -> response)
     }
@@ -949,6 +955,7 @@ private[kafka] class Processor(val id: Int,
 
   private def poll(): Unit = {
     val pollTimeout = if (newConnections.isEmpty) 300 else 0
+    // 这里复用了客户端的代码
     try selector.poll(pollTimeout)
     catch {
       case e @ (_: IllegalStateException | _: IOException) =>
@@ -967,7 +974,7 @@ private[kafka] class Processor(val id: Int,
   }
 
   private def processCompletedReceives(): Unit = {
-    // 遍历每个请求
+    // 遍历每个客户端请求
     selector.completedReceives.forEach { receive =>
       try {
         openOrClosingChannel(receive.source) match {
@@ -1002,10 +1009,12 @@ private[kafka] class Processor(val id: Int,
                   }
                 }
                 // todo huangran 这里的 requestChannel 是什么
-                // 发送到 requestQueue 队列中
+                // 发送到 requestQueue 队列中，实际并没有处理
+                // 后面有一个线程池 dataPlaneRequestHandlerPool 专门来处理这个队列里的事件
                 requestChannel.sendRequest(req)
                 // 移除 OP_READ 事件
                 selector.mute(connectionId)
+                // todo huangran 这里是干什么的
                 handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
               }
             }

@@ -134,7 +134,9 @@ class KafkaApis(val requestChannel: RequestChannel,
       trace(s"Handling request:${request.requestDesc(true)} from connection ${request.context.connectionId};" +
         s"securityProtocol:${request.context.securityProtocol},principal:${request.context.principal}")
       request.header.apiKey match {
+        // 处理生产者发送过来的请求
         case ApiKeys.PRODUCE => handleProduceRequest(request)
+        // 拉取元数据
         case ApiKeys.FETCH => handleFetchRequest(request)
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
@@ -505,6 +507,7 @@ class KafkaApis(val requestChannel: RequestChannel,
    * Handle a produce request
    */
   def handleProduceRequest(request: RequestChannel.Request): Unit = {
+    // 请求信息
     val produceRequest = request.body[ProduceRequest]
     val numBytesAppended = request.header.toStruct.sizeOf + request.sizeOfBodyInBytes
 
@@ -516,17 +519,23 @@ class KafkaApis(val requestChannel: RequestChannel,
         return
       }
       // Note that authorization to a transactionalId implies ProducerId authorization
-
+    // 权限
     } else if (produceRequest.hasIdempotentRecords && !authorize(request.context, IDEMPOTENT_WRITE, CLUSTER, CLUSTER_NAME)) {
       sendErrorResponseMaybeThrottle(request, Errors.CLUSTER_AUTHORIZATION_FAILED.exception)
       return
     }
 
+    // 获取生产者发送的分区和批记录，并保存到 Map 中
     val produceRecords = produceRequest.partitionRecordsOrFail.asScala
+    // 存储 topic 没有授权的请求 Map
     val unauthorizedTopicResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    // 存储 topic 不存在的请求 Map
     val nonExistingTopicResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    // 存储 request 不合法的请求 Map
     val invalidRequestResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    // 存储正常的请求的 Map
     val authorizedRequestInfo = mutable.Map[TopicPartition, MemoryRecords]()
+    // 正常的 topic
     val authorizedTopics = filterByAuthorized(request.context, WRITE, TOPIC, produceRecords)(_._1.topic)
 
     for ((topicPartition, memoryRecords) <- produceRecords) {
@@ -579,6 +588,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
 
       // Send the response immediately. In case of throttling, the channel has already been muted.
+      // 生产者设置 acks = 0，生产者不关心数据处理结果，所以不返回响应
       if (produceRequest.acks == 0) {
         // no operation needed if producer request.required.acks = 0; however, if there is any error in handling
         // the request, since no response is expected by the producer, the server will close socket server so that
@@ -599,6 +609,7 @@ class KafkaApis(val requestChannel: RequestChannel,
           sendNoOpResponseExemptThrottle(request)
         }
       } else {
+        // 给生产者返回响应
         sendResponse(request, Some(new ProduceResponse(mergedResponseStatus.asJava, maxThrottleTimeMs)), None)
       }
     }
@@ -609,12 +620,14 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
     }
 
+    // 正常的为空
     if (authorizedRequestInfo.isEmpty)
       sendResponseCallback(Map.empty)
     else {
       val internalTopicsAllowed = request.header.clientId == AdminUtils.AdminClientId
 
       // call the replica manager to append messages to the replicas
+      // 将收到的数据写到磁盘
       replicaManager.appendRecords(
         timeout = produceRequest.timeout.toLong,
         requiredAcks = produceRequest.acks,
@@ -3356,6 +3369,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         new RequestChannel.NoOpResponse(request)
     }
 
+    // 在这里将 response 发送给生产者
     requestChannel.sendResponse(response)
   }
 
