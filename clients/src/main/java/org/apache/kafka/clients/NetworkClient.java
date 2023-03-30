@@ -16,24 +16,6 @@
  */
 package org.apache.kafka.clients;
 
-import java.io.IOException;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.nio.BufferUnderflowException;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Random;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
-
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
@@ -53,19 +35,21 @@ import org.apache.kafka.common.protocol.CommonFields;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.protocol.types.SchemaException;
 import org.apache.kafka.common.protocol.types.Struct;
-import org.apache.kafka.common.requests.AbstractRequest;
-import org.apache.kafka.common.requests.AbstractResponse;
-import org.apache.kafka.common.requests.ApiVersionsRequest;
-import org.apache.kafka.common.requests.ApiVersionsResponse;
-import org.apache.kafka.common.requests.MetadataRequest;
-import org.apache.kafka.common.requests.MetadataResponse;
-import org.apache.kafka.common.requests.RequestHeader;
-import org.apache.kafka.common.requests.ResponseHeader;
+import org.apache.kafka.common.requests.*;
 import org.apache.kafka.common.security.authenticator.SaslClientAuthenticator;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
+
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 /**
  * A network client for asynchronous request/response network i/o. This is an internal class used to implement the
@@ -364,8 +348,11 @@ public class NetworkClient implements KafkaClient {
             log.trace("Cancelled request {} {} with correlation id {} due to node {} being disconnected",
                     request.header.apiKey(), request.request, request.header.correlationId(), nodeId);
 
-            // isInternalRequest 默认为 true
-            // todo huangran 内部请求不处理了？
+            /**
+             * 用户发送的消息封装的请求 isInternalRequest 为 false
+             * @see org.apache.kafka.clients.producer.internals.Sender#sendProducerData(long)
+             * @see NetworkClient#send(ClientRequest, long)
+             */
             if (!request.isInternalRequest) {
                 // 对于长时间没有收到响应的外部请求，它自己封装了一个响应，这个响应里面没有服务端响应消息，并且 disconnect 状态标识为 true.
                 if (responses != null)
@@ -482,6 +469,7 @@ public class NetworkClient implements KafkaClient {
      * Queue up the given request for sending. Requests can only be sent out to ready nodes.
      * @param request The request
      * @param now The current timestamp
+     * 对于用户发送的请求，isInternalRequest 为 false，表示这不是内部请求
      */
     @Override
     public void send(ClientRequest request, long now) {
@@ -617,7 +605,7 @@ public class NetworkClient implements KafkaClient {
         handleConnections();                                // 处理连接的请求
         handleInitiateApiVersionRequests(updatedNow);
         handleTimedOutConnections(responses, updatedNow);  // 处理超时的连接
-        handleTimedOutRequests(responses, updatedNow);     // 处理超时的请求
+        handleTimedOutRequests(responses, updatedNow);     // 处理超时的已经发送的请求
         completeResponses(responses);                      // 处理响应，调用响应中对应的回调函数
 
         return responses;
@@ -842,6 +830,9 @@ public class NetworkClient implements KafkaClient {
      *
      * @param responses The list of responses to update
      * @param now The current time
+     * 这里是处理 inFlightRequests 中所有的请求，即已经发送的请求。注意这里的 inFlightRequests 是 NetworkClient 的属性，存储的是请求。
+     * 如果发现超时，这里会关闭连接，即使服务端已经处理完了响应，因为连接已经关闭了，所以服务端的响应也发送不到客户端。
+     * todo huangran 确认该逻辑
      */
     private void handleTimedOutRequests(List<ClientResponse> responses, long now) {
         // 超时的主机
@@ -1319,7 +1310,7 @@ public class NetworkClient implements KafkaClient {
         final RequestCompletionHandler callback;
         final boolean expectResponse;
         final AbstractRequest request;
-        // 请求分内部和外部，内部的请求是指由 NetworkClient 创建的请求
+        // 请求分内部和外部，内部的请求是指由 NetworkClient 创建的请求，用户发送的消息封装的请求这个值是 false
         final boolean isInternalRequest; // used to flag requests which are initiated internally by NetworkClient
         final Send send;
         final long sendTimeMs;
