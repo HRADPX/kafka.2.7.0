@@ -392,12 +392,13 @@ public class Sender implements Runnable {
 
         // 处理超时的请求
         accumulator.resetNextBatchExpiryTime();
-        // 发送的批次但是没有发送的批次
+        // 已经发送但是没有收到响应的批次
         List<ProducerBatch> expiredInflightBatches = getExpiredInflightBatches(now);
         // 获取消息收集器中过期的批次
         List<ProducerBatch> expiredBatches = this.accumulator.expiredBatches(now);
         expiredBatches.addAll(expiredInflightBatches);
 
+        // todo huangran @TransactionState.resetIdempotentProducerId
         // Reset the producer id if an expired batch has previously been sent to the broker. Also update the metrics
         // for expired batches. see the documentation of @TransactionState.resetIdempotentProducerId to understand why
         // we need to reset the producer id here.
@@ -406,7 +407,8 @@ public class Sender implements Runnable {
         for (ProducerBatch expiredBatch : expiredBatches) {
             String errorMessage = "Expiring " + expiredBatch.recordCount + " record(s) for " + expiredBatch.topicPartition
                 + ":" + (now - expiredBatch.createdMs) + " ms has passed since batch creation";
-            // 处理超时的批次
+            // 处理超时的批次, 该批次的 finalState 会从 null 被设置为 FAILED，并从 inFlightBatches 中移除，释放批次资源
+            // 但是，这并不能任务这个批次失败了，因为后续服务端可能会返回成功响应，也会处理这个批次，并认为是成功的。
             failBatch(expiredBatch, -1, NO_TIMESTAMP, new TimeoutException(errorMessage), false);
             if (transactionManager != null && expiredBatch.inRetry()) {
                 // This ensures that no new batches are drained until the current in flight batches are fully resolved.
@@ -587,6 +589,7 @@ public class Sender implements Runnable {
                 requestHeader, response.destination());
             for (ProducerBatch batch : batches.values())
                 completeBatch(batch, new ProduceResponse.PartitionResponse(Errors.NETWORK_EXCEPTION), correlationId, now);
+        // 不支持的版本
         } else if (response.versionMismatch() != null) {
             log.warn("Cancelled request {} due to a version mismatch with node {}",
                     response, response.destination(), response.versionMismatch());
@@ -595,12 +598,14 @@ public class Sender implements Runnable {
         } else {
             log.trace("Received produce response from node {} with correlation id {}", response.destination(), correlationId);
             // if we have a response, parse it
+            // 有响应体
             if (response.hasResponse()) {
                 ProduceResponse produceResponse = (ProduceResponse) response.responseBody();
                 for (Map.Entry<TopicPartition, ProduceResponse.PartitionResponse> entry : produceResponse.responses().entrySet()) {
                     TopicPartition tp = entry.getKey();
                     ProduceResponse.PartitionResponse partResp = entry.getValue();
                     ProducerBatch batch = batches.get(tp);
+                    // 处理响应
                     completeBatch(batch, partResp, correlationId, now);
                 }
                 this.sensors.recordLatency(response.destination(), response.requestLatencyMs());
@@ -609,6 +614,7 @@ public class Sender implements Runnable {
                 // acks = 0 表示客户端发送的请求不需要返回响应
                 // acks = 1 表示客户端发送的请求写入 leader 节点中，返回响应
                 // acks = -1 表示客户端发送的请求写入 leader 和 follower 节点后，返回响应
+                // 无响应体
                 for (ProducerBatch batch : batches.values()) {
                     completeBatch(batch, new ProduceResponse.PartitionResponse(Errors.NONE), correlationId, now);
                 }
@@ -628,7 +634,7 @@ public class Sender implements Runnable {
                                long now) {
         Errors error = response.error;
 
-        // request 大小超过服务端最大的大小
+        // request 大小超过服务端能接收的最大的大小，将大请求拆分成多个小的请求再次发送，不减少重试次数
         if (error == Errors.MESSAGE_TOO_LARGE && batch.recordCount > 1 && !batch.isDone() &&
                 (batch.magic() >= RecordBatch.MAGIC_VALUE_V2 || batch.isCompressed())) {
             // If the batch is too large, we split the batch and send the split batches again. We do not decrement
@@ -641,11 +647,12 @@ public class Sender implements Runnable {
                 error);
             if (transactionManager != null)
                 transactionManager.removeInFlightBatch(batch);
+            // todo huangran 请求如何拆分...
             this.accumulator.splitAndReenqueue(batch);
             maybeRemoveAndDeallocateBatch(batch);
             this.sensors.recordBatchSplit();
         } else if (error != Errors.NONE) {
-            // 有异常，可重试
+            // 有异常，可重试，需要重新入消息收集器中的队列
             if (canRetry(batch, response, now)) {
                 log.warn(
                     "Got error produce response with correlation id {} on topic-partition {}, retrying ({} attempts left). Error: {}",
@@ -687,7 +694,7 @@ public class Sender implements Runnable {
                 metadata.requestUpdate();
             }
         } else {
-            // 其他场景，调用用户的回调函数，释放资源
+            // 无 error，调用用户的回调函数，释放资源
             completeBatch(batch, response);
         }
 
@@ -698,6 +705,7 @@ public class Sender implements Runnable {
 
     private void reenqueueBatch(ProducerBatch batch, long currentTimeMs) {
         this.accumulator.reenqueue(batch, currentTimeMs);
+        // 从 inFlightBatches 中移除
         maybeRemoveFromInflightBatches(batch);
         this.sensors.recordRetries(batch.topicPartition.topic(), batch.recordCount);
     }
@@ -721,6 +729,9 @@ public class Sender implements Runnable {
         failBatch(batch, response.baseOffset, response.logAppendTime, exception, adjustSequenceNumbers);
     }
 
+    /**
+     * 失败调用
+     */
     private void failBatch(ProducerBatch batch,
                            long baseOffset,
                            long logAppendTime,
@@ -742,6 +753,12 @@ public class Sender implements Runnable {
      * We can retry a send if the error is transient and the number of attempts taken is fewer than the maximum allowed.
      * We can also retry OutOfOrderSequence exceptions for future batches, since if the first batch has failed, the
      * future batches are certain to fail with an OutOfOrderSequence exception.
+     *
+     * 重试条件：
+     * 1）请求批次没有超时
+     * 2）没有达到最大重试次数，默认为 {@link Integer#MAX_VALUE}，该参数受批次超时时间影响，如果批次超时，即使没有达到重试上限，也是失败
+     * 3）批次没有状态为未完成（如果 Producer 被强制关闭了，没有发送的批次会被强制废弃）
+     * 4）响应的异常为可重试的异常，表示重试可能会成功（非事务），对于事务的消息，如果是乱序达到服务端，也需要重试
      */
     private boolean canRetry(ProducerBatch batch, ProduceResponse.PartitionResponse response, long now) {
         return !batch.hasReachedDeliveryTimeout(accumulator.getDeliveryTimeoutMs(), now) &&

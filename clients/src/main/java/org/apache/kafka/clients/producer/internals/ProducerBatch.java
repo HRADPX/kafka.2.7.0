@@ -65,6 +65,7 @@ public final class ProducerBatch {
     final TopicPartition topicPartition;
     final ProduceRequestResult produceFuture;
 
+    // thunks 保存了这个批次里所有的消息
     private final List<Thunk> thunks = new ArrayList<>();
     private final MemoryRecordsBuilder recordsBuilder;
     // 重试次数
@@ -186,6 +187,10 @@ public final class ProducerBatch {
      * @param logAppendTime The log append time or -1 if CreateTime is being used
      * @param exception The exception that occurred (or null if the request was successful)
      * @return true if the batch was completed successfully and false if the batch was previously aborted
+     *
+     * 一个批次这个方法在以下两种场景会被调用两次：
+     *  1）如果该批次在规定的时间间隔没有收到服务端的响应，它会被这是为 FAILED，但是如果服务端成功响应，它会被第二次调用。
+     *  2）如果生产者被强制关闭，它会被设置为 ABORTED，如果服务端成功响应，它会被第二次调用。
      */
     public boolean done(long baseOffset, long logAppendTime, RuntimeException exception) {
         final FinalState tryFinalState = (exception == null) ? FinalState.SUCCEEDED : FinalState.FAILED;
@@ -196,12 +201,19 @@ public final class ProducerBatch {
             log.trace("Failed to produce messages to {} with base offset {}.", topicPartition, baseOffset, exception);
         }
 
+        // 设置消息批次发送结果。这个 CAS 操作可能会失败，表示已经不是第一次处理这个批次了，比如一个批次已经发送很长时间了，
+        // 但是没有收到服务端的响应，这个批次在等待超过最大超时时间后，被认为超时了，会在某个 Sender 线程的某次执行过程中在
+        // Sender#sendProducerData 方法里处理超时的批次，在那里会释放资源并将 finalState 设置为 FAILED。
+        // 由于 finalState 状态一旦设置就是不可变的，所以这里会设置失败。
         if (this.finalState.compareAndSet(null, tryFinalState)) {
+            // 第一处理这个批次，返回 true 后续会释放资源
             completeFutureAndFireCallbacks(baseOffset, logAppendTime, exception);
             return true;
         }
 
         if (this.finalState.get() != FinalState.SUCCEEDED) {
+            // 可能是上面超时的场景，仅仅记录下，返回 false，并没有后续释放资源等操作，实际已经达到服务端，客户端认为是失败的，
+            // 客户端会根据捕获的超时异常，并执行相应的动作。
             if (tryFinalState == FinalState.SUCCEEDED) {
                 // Log if a previously unsuccessful batch succeeded later on.
                 log.debug("ProduceResponse returned {} for {} after batch with base offset {} had already been {}.",

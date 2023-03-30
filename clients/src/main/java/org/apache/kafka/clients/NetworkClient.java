@@ -612,7 +612,7 @@ public class NetworkClient implements KafkaClient {
         long updatedNow = this.time.milliseconds();
         List<ClientResponse> responses = new ArrayList<>();
         handleCompletedSends(responses, updatedNow);        // 处理已经完成发送的请求
-        handleCompletedReceives(responses, updatedNow);     // 接收服务端的响应后会保存到 completedReceives 中，这里解析
+        handleCompletedReceives(responses, updatedNow);     // 接收服务端的响应后会保存到 completedReceives 中，后续在 completeResponse 里处理
         handleDisconnections(responses, updatedNow);        // 处理断开的连接
         handleConnections();                                // 处理连接的请求
         handleInitiateApiVersionRequests(updatedNow);
@@ -626,6 +626,8 @@ public class NetworkClient implements KafkaClient {
     private void completeResponses(List<ClientResponse> responses) {
         for (ClientResponse response : responses) {
             try {
+                // 执行 callback 的回调函数，在构造客户端请求时，将回调函数封装到了请求中
+                /** @see org.apache.kafka.clients.producer.internals.Sender#sendProduceRequest */
                 response.onComplete();
             } catch (Exception e) {
                 log.error("Uncaught error in request completion:", e);

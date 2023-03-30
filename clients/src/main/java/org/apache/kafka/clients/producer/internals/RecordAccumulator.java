@@ -360,6 +360,7 @@ public final class RecordAccumulator {
      * whether the batch has reached deliveryTimeoutMs or not. Hence we do not do the delivery timeout check here.
      */
     public void reenqueue(ProducerBatch batch, long now) {
+        // 设置重试标识，如果一个批次重试，它的 attempts > 0
         batch.reenqueued(now);
         Deque<ProducerBatch> deque = getOrCreateDeque(batch.topicPartition);
         synchronized (deque) {
