@@ -421,10 +421,15 @@ public class Selector implements Selectable, AutoCloseable {
     public void send(Send send) {
         String connectionId = send.destination();
         // 获取 KafkaChannel，这里的 KafkaChannel 是从 channels 这个 Map 中获取的，
-        // 之前在建立连接成功后，会将主机信息和 KafkaChannel 的映射保存起来
+        // 之前在建立连接成功后，会将主机信息和 KafkaChannel 的映射保存到 channels 中。
+        // 如果连接关闭但是还需要接收通道里的数据，如执行 close(channel, CloseMode.GRACEFUL) 方法，会将该
+        // KafkaChannel 存到这个 closingChannels 集合中。
         KafkaChannel channel = openOrClosingChannelOrFail(connectionId);
         if (closingChannels.containsKey(connectionId)) {
             // ensure notification via `disconnected`, leave channel in the state in which closing was triggered
+            // 表示连接已经断开，直接将 nodeId 放到失败的集合中，在下次执行 poll 方法时，会执行里 clear() 方法，将该集合里的
+            // nodeId 存入到 Selector 里的 disconnected 数据结构中。最后在执行完成 poll 方法后，执行 handleDisconnections
+            // 方法来处理这里所有发送失败的请求。
             this.failedSends.add(connectionId);
         } else {
             try {
@@ -644,6 +649,7 @@ public class Selector implements Selectable, AutoCloseable {
                 }
 
                 /* cancel any defunct sockets */
+                /* key cancel, channel close or selector close */
                 if (!key.isValid())
                     close(channel, CloseMode.GRACEFUL);
 
@@ -901,6 +907,7 @@ public class Selector implements Selectable, AutoCloseable {
             }
         }
 
+        // 将 failedSends 里的 nodeId 存到 disconnected 中，会在后的 handleDisconnections() 方法里处理发送这些节点的请求。
         for (String channel : this.failedSends)
             this.disconnected.put(channel, ChannelState.FAILED_SEND);
         this.failedSends.clear();
@@ -936,7 +943,7 @@ public class Selector implements Selectable, AutoCloseable {
             // CloseMode.DISCARD_NO_NOTIFY: 关闭连接并且不发送通知
             close(channel, CloseMode.DISCARD_NO_NOTIFY);
         } else {
-            // 关闭的
+            // 表示之前可能连接都没有建立
             KafkaChannel closingChannel = this.closingChannels.remove(id);
             // Close any closing channel, leave the channel in the state in which closing was triggered
             if (closingChannel != null)
@@ -993,6 +1000,8 @@ public class Selector implements Selectable, AutoCloseable {
         // 处理可能没有完成的请求和响应
         if (closeMode == CloseMode.GRACEFUL && maybeReadFromClosingChannel(channel)) {
             // 添加到关闭的 channel 数据结构中
+            // 这里和下面分之的区别是没有关闭像 SocketChannel 等资源，只是把 Channel 放到了一个集合中。
+            // 目的是在下次发送中如果发现当前的主机已经在关闭了，就不要再发送消息了。
             closingChannels.put(channel.id(), channel);
             log.debug("Tracking closing connection {} to process outstanding requests", channel.id());
         } else {
@@ -1014,6 +1023,7 @@ public class Selector implements Selectable, AutoCloseable {
         try {
             immediatelyConnectedKeys.remove(key);
             keysWithBufferedRead.remove(key);
+            // 执行 close 方法
             channel.close();
         } catch (IOException e) {
             log.error("Exception closing connection to node {}:", channel.id(), e);

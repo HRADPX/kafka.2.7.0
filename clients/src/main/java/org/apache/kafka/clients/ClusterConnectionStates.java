@@ -45,6 +45,7 @@ final class ClusterConnectionStates {
     private final Map<String, NodeConnectionState> nodeState;
     private final Logger log;
     // 保存正在连接的主机，集合里的主机都没有完成连接
+    // 在初始化连接时存到这个集合中
     private Set<String> connectingNodes;
     private ExponentialBackoff reconnectBackoff;
     private ExponentialBackoff connectionSetupTimeout;
