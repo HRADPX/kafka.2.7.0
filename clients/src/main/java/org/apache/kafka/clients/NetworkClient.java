@@ -16,24 +16,6 @@
  */
 package org.apache.kafka.clients;
 
-import java.io.IOException;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.nio.BufferUnderflowException;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Random;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
-
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
@@ -44,29 +26,27 @@ import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersionsResponseKey;
 import org.apache.kafka.common.metrics.Sensor;
-import org.apache.kafka.common.network.ChannelState;
-import org.apache.kafka.common.network.NetworkReceive;
-import org.apache.kafka.common.network.Selectable;
-import org.apache.kafka.common.network.Selector;
-import org.apache.kafka.common.network.Send;
+import org.apache.kafka.common.network.*;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.CommonFields;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.protocol.types.SchemaException;
 import org.apache.kafka.common.protocol.types.Struct;
-import org.apache.kafka.common.requests.AbstractRequest;
-import org.apache.kafka.common.requests.AbstractResponse;
-import org.apache.kafka.common.requests.ApiVersionsRequest;
-import org.apache.kafka.common.requests.ApiVersionsResponse;
-import org.apache.kafka.common.requests.MetadataRequest;
-import org.apache.kafka.common.requests.MetadataResponse;
-import org.apache.kafka.common.requests.RequestHeader;
-import org.apache.kafka.common.requests.ResponseHeader;
+import org.apache.kafka.common.requests.*;
 import org.apache.kafka.common.security.authenticator.SaslClientAuthenticator;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
+
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 /**
  * A network client for asynchronous request/response network i/o. This is an internal class used to implement the
@@ -877,7 +857,7 @@ public class NetworkClient implements KafkaClient {
      * @param now The current time
      *
      * 处理超时的连接，如果一个连接保持 ConnectionState.CONNECTING 状态的时间超过规定的时间，表示这个连接超时了，需要断开这个连接。
-     * 所有正在建立连接的连接都保存在 {@link ClusterConnectionStates#connectingNodes} 这个列表中，完成握手，会从这个列表中将其移除。
+     * 所有正在建立连接的连接都保存在 ClusterConnectionStates#connectingNodes 这个列表中，完成握手，会从这个列表中将其移除。
      * @see NetworkClient#ready(org.apache.kafka.common.Node, long)
      * @see ClusterConnectionStates#connecting
      * @see ClusterConnectionStates#ready
@@ -1014,7 +994,7 @@ public class NetworkClient implements KafkaClient {
      * 的请求所有都要失败，这里的是处理这些失败的请求。
      * @see Selector#close(java.lang.String)
      * @see Selector#send(Send)
-     * @see Selector#clear()
+     * @see Selector#poll(long) 里的 clear
      */
     private void handleDisconnections(List<ClientResponse> responses, long now) {
         for (Map.Entry<String, ChannelState> entry : this.selector.disconnected().entrySet()) {
@@ -1026,7 +1006,7 @@ public class NetworkClient implements KafkaClient {
 
     /**
      * Record any newly completed connections
-     * 连接已经建立，这个方法会将当前连接从 {@link ClusterConnectionStates#connectingNodes} 移除，表示建立连接成功。
+     * 连接已经建立，这个方法会将当前连接从 ClusterConnectionStates#connectingNodes 移除，表示建立连接成功。
      * 同时会将节点的状态更新为 ConnectionState.READY. 但是如果开启 SSL，还不能发送请求，因为 SSL 握手是在 TCP 握手之后，
      * 此时节点的状态是 ConnectionState.CHECKING_API_VERSIONS, 等握手成功后，才能发送请求。
      */

@@ -16,27 +16,6 @@
  */
 package org.apache.kafka.common.network;
 
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.Socket;
-import java.nio.channels.CancelledKeyException;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.SocketChannel;
-import java.nio.channels.UnresolvedAddressException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.errors.AuthenticationException;
@@ -44,16 +23,22 @@ import org.apache.kafka.common.memory.MemoryPool;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.internals.IntGaugeSuite;
-import org.apache.kafka.common.metrics.stats.Avg;
-import org.apache.kafka.common.metrics.stats.CumulativeSum;
-import org.apache.kafka.common.metrics.stats.Max;
-import org.apache.kafka.common.metrics.stats.Meter;
-import org.apache.kafka.common.metrics.stats.SampledStat;
-import org.apache.kafka.common.metrics.stats.WindowedCount;
+import org.apache.kafka.common.metrics.stats.*;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.nio.channels.CancelledKeyException;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.SocketChannel;
+import java.nio.channels.UnresolvedAddressException;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A nioSelector interface for doing non-blocking multi-connection network I/O.
@@ -887,6 +872,8 @@ public class Selector implements Selectable, AutoCloseable {
      * Clients rely on Selector invoking {@link #clear()} at the start of each poll() since memory usage
      * is less critical and clearing once-per-poll provides the flexibility to process these results in
      * any order before the next poll.
+     *
+     * 在执行 poll 方法之前需要将上次 poll 方法执行的结果清空。
      */
     private void clear() {
         this.completedSends.clear();
@@ -895,6 +882,8 @@ public class Selector implements Selectable, AutoCloseable {
         this.disconnected.clear();
 
         // Remove closed channels after all their buffered receives have been processed or if a send was requested
+        // 处理那些关闭连接后还需要处理数据的 KafkaChannel，如调用 close(channel, CloseMode.GRACEFUL)，会将当前 KafkaChannel
+        // 存到 closingChannels 中，后续发送的该节点的请求都会失败，通道会在这里被关闭...
         for (Iterator<Map.Entry<String, KafkaChannel>> it = closingChannels.entrySet().iterator(); it.hasNext(); ) {
             KafkaChannel channel = it.next().getValue();
             boolean sendFailed = failedSends.remove(channel.id());
@@ -902,12 +891,13 @@ public class Selector implements Selectable, AutoCloseable {
             if (!sendFailed)
                 hasPending = maybeReadFromClosingChannel(channel);
             if (!hasPending || sendFailed) {
+                // Note: 这里的 notifyDisconnect 为 true，表示需要通知，在该方法里会将 nodeId 放到 disconnected 集合中
                 doClose(channel, true);
                 it.remove();
             }
         }
 
-        // 将 failedSends 里的 nodeId 存到 disconnected 中，会在后的 handleDisconnections() 方法里处理发送这些节点的请求。
+        // 将其他情况发送服务端节点失败的 nodeId 放到 disconnected 集合中，后续会在 NetworkClient#poll#handleDisconnections 方法中处理
         for (String channel : this.failedSends)
             this.disconnected.put(channel, ChannelState.FAILED_SEND);
         this.failedSends.clear();
@@ -943,7 +933,7 @@ public class Selector implements Selectable, AutoCloseable {
             // CloseMode.DISCARD_NO_NOTIFY: 关闭连接并且不发送通知
             close(channel, CloseMode.DISCARD_NO_NOTIFY);
         } else {
-            // 表示之前可能连接都没有建立
+            // 表示之前可能连接都没有建立或者连接被关闭了
             KafkaChannel closingChannel = this.closingChannels.remove(id);
             // Close any closing channel, leave the channel in the state in which closing was triggered
             if (closingChannel != null)
