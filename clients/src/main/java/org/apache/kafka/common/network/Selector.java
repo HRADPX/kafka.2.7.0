@@ -270,7 +270,7 @@ public class Selector implements Selectable, AutoCloseable {
             // 并将 SocketChannel 封装成 KafkaChannel，同时把 Key 和 KafkaChannel 关联起来，便于后续使用...
             key = registerChannel(id, socketChannel, SelectionKey.OP_CONNECT);
 
-            // 正常情况下，网络不会立刻完成连接..
+            // 正常情况下，网络不会立刻完成连接，除非是本地连接，这里是 true
             if (connected) {
                 // OP_CONNECT won't trigger for immediately connected channels
                 log.debug("Immediately connected to node {}", id);
@@ -380,6 +380,8 @@ public class Selector implements Selectable, AutoCloseable {
 
     /**
      * Interrupt the nioSelector if it is blocked waiting to do I/O.
+     *
+     * 如果有其他线程阻塞在 {@link Selector#select(long)} 或 {@link Selector#select()} 方法上，调用该方法可以让其立刻返回。
      */
     @Override
     public void wakeup() {
@@ -573,6 +575,7 @@ public class Selector implements Selectable, AutoCloseable {
                 if (isImmediatelyConnected || key.isConnectable()) {
                     // 如果之前没有完成网络连接，这里完成...
                     // 完成连接建立后，会取消 OP_CONNECT 事件并给当前 KafkaChannel(SocketChannel) 增加 OP_READ 事件，可以接收服务端响应了
+                    // 注册 OP_CONNECT 事件如果不是本地连接，后续需要通过 finishConnect() 方法判断是否完成连接建立
                     if (channel.finishConnect()) {
                         // 存储完成的网络连接
                         this.connected.add(nodeId);
@@ -622,7 +625,8 @@ public class Selector implements Selectable, AutoCloseable {
 
                 //if channel is ready and has bytes to read from socket or buffer, and has no
                 //previous completed receive then read from it
-                // 接收服务端发送回来的响应
+                // 对于客户端是接收服务端发送回来的响应
+                // 对于服务端是接收客户端发送过来的请求
                 if (channel.ready() && (key.isReadable() || channel.hasBytesBuffered()) && !hasCompletedReceive(channel)
                         && !explicitlyMutedChannels.contains(channel)) {
                     attemptRead(channel);

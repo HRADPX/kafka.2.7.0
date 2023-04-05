@@ -604,7 +604,7 @@ public class NetworkClient implements KafkaClient {
             return responses;
         }
 
-        // 封装了一个拉取元数据的请求
+        // 获取元数据过期时间，如果有必要发送一个拉取元数据的请求拉元数据
         long metadataTimeout = metadataUpdater.maybeUpdate(now);
         try {
             // 发送请求，执行网络 I/O 操作

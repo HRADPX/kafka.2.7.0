@@ -74,6 +74,20 @@ import scala.util.control.ControlThrowable
  *      1 Acceptor thread that handles new connections
  *      Acceptor has 1 Processor thread that has its own selector and read requests from the socket.
  *      1 Handler thread that handles requests and produce responses back to the processor thread for writing.
+ *
+ * Kafka Server 支持两种模式的请求类型
+ *  （1）数据类请求：data-plane
+ *     1）处理客户端或其他代理服务器的请求。
+ *     2）它有一个 Acceptor 线程处理网络中的连接请求，可以在 KafkaConfig.listeners 配置多个数据请求路径，并用逗号分隔。
+ *     3）一个 Acceptor 线程有多个 Processor 线程，每个 Processor 都有自己独立的 Selector，并从 SocketChannel 中读取数据，它实际并不处理请求。
+ *     4）同时会有多个 Handler 线程真正处理请求并返回响应给对应的 Processor 线程。
+ *  （2）控制类型请求：control-plane
+ *     1）处理来自控制类请求，如更新元数据请求（UpdateMetadataRequest）、停止副本同步请求（StopReplicaRequest）
+ *     2) 它有一个 Acceptor 线程处理网络中的连接请求，可以在 KafkaConfig.control.plane.listener.name 配置。如果没有配置，则控制类型请求会被数据类型请求的线程模型处理。
+ *     3）有一个 Processor 线程和自己的 Selector，并从 SocketChannel 中读取数据，它实际并不处理请求。
+ *     4）一个 Handler 线程真正处理请求并返回响应给 Processor 线程。
+ *
+ *  在下面 SocketServer 启动时，会看到会分别启动这两个请求类型的线程模型。
  */
 class SocketServer(val config: KafkaConfig,
                    val metrics: Metrics,
@@ -117,15 +131,20 @@ class SocketServer(val config: KafkaConfig,
    * when processors start up and invoke [[org.apache.kafka.common.network.Selector#poll]].
    *
    * @param startProcessingRequests Flag indicating whether `Processor`s must be started.
+   * 创建 ServerSocket 并创建所有的 Acceptor 和 Processor 线程，如果入参 startProcessingRequests 为 true（默认为 false），
+   * 则这些线程会立刻启动，否则所有的 Acceptor 和 Processor 线程只有在调用 [[kafka.network.SocketServer#startProcessingRequests()]]
+   * 方法时才会被启动。延迟启动的目的是为了等待 Server 被完成实例化，例如保证所有的证书都被加载。
    */
   def startup(startProcessingRequests: Boolean = true): Unit = {
     this.synchronized {
+      // 连接队列
       connectionQuotas = new ConnectionQuotas(config, time, metrics)
-      // todo huangran 确认这两个方法的区别
-      // 创建 Acceptor 线程和 Processor 线程
+      // 创建控制类线程模型的 Acceptor 线程和 Processor 线程（if it was configured）
+      // 如果没有配置，控制类请求会被数据类请求的线程模型处理
       createControlPlaneAcceptorAndProcessor(config.controlPlaneListener)
-      // config.numNetworkThreads: Kafka worker 线程的个数，默认是 3
+      // 创建数据类线程模型的 Acceptor 线程和 Processor 线程，config.numNetworkThreads: Kafka worker 线程的个数，默认是 3
       createDataPlaneAcceptorsAndProcessors(config.numNetworkThreads, config.dataPlaneListeners)
+      // startProcessingRequests 默认为 false
       if (startProcessingRequests) {
         // 启动 Acceptor 线程...
         this.startProcessingRequests()
@@ -211,6 +230,7 @@ class SocketServer(val config: KafkaConfig,
     acceptor.startProcessors(threadPrefix)
     debug(s"Start acceptor thread on listener ${endpoint.listenerName}")
     if (!acceptor.isStarted()) {
+      // 启动 Acceptor
       KafkaThread.nonDaemon(
         s"${threadPrefix}-kafka-socket-acceptor-${endpoint.listenerName}-${endpoint.securityProtocol}-${endpoint.port}",
         acceptor
@@ -254,6 +274,7 @@ class SocketServer(val config: KafkaConfig,
                                                     endpoints: Seq[EndPoint]): Unit = {
     endpoints.foreach { endpoint =>
       connectionQuotas.addListener(config, endpoint.listenerName)
+      // 创建 Acceptor 线程
       val dataPlaneAcceptor = createAcceptor(endpoint, DataPlaneMetricPrefix)
       // 启动 Processor 线程
       addDataPlaneProcessors(dataPlaneAcceptor, endpoint, dataProcessorsPerListener)
@@ -302,7 +323,7 @@ class SocketServer(val config: KafkaConfig,
       nextProcessorId += 1
     }
     listenerProcessors.foreach(p => dataPlaneProcessors.put(p.id, p))
-    // 添加到 Acceptor 线程，并启动
+    // 添加到 Acceptor 线程
     acceptor.addProcessors(listenerProcessors, DataPlaneThreadPrefix)
   }
 
@@ -547,8 +568,10 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
                               connectionQuotas: ConnectionQuotas,
                               metricPrefix: String) extends AbstractServerThread(connectionQuotas) with KafkaMetricsGroup {
 
+  // NIO API
   private val nioSelector = NSelector.open()
   val serverChannel = openServerSocket(endPoint.host, endPoint.port)
+  // 存储 Processor 线程
   private val processors = new ArrayBuffer[Processor]()
   private val processorsStarted = new AtomicBoolean
   private val blockedPercentMeter = newMeter(s"${metricPrefix}AcceptorBlockedPercent",
@@ -556,6 +579,7 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
 
   private[network] def addProcessors(newProcessors: Buffer[Processor], processorThreadPrefix: String): Unit = synchronized {
     processors ++= newProcessors
+    // 默认是 false，首次调用这个方法不会启动 Processor 线程
     if (processorsStarted.get)
       // 启动线程
       startProcessors(newProcessors, processorThreadPrefix)
@@ -603,9 +627,12 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
 
   /**
    * Accept loop that checks for new connection attempts
+   * Acceptor 线程只做一件事，一直循环处理连接事件，并通过轮询的方式从 processors 线程队列中选择 Processor 线程来处理连接事件。
+   * 这里并没有在 Acceptor 线程中处理，这是因为如果有处理的比较慢，那么在高并发场景下，后续新的网络连接则会被一直阻塞，影响 Acceptor 线程处理效率。
+   * Processor 在获取到连接事件后，将其存储到自己内部维护的阻塞队列 [[Processor.newConnections]] 里，并在自己的 run 方法里执行。
    */
   def run(): Unit = {
-    // 注册一个接收事件
+    // 注册一个接收事件， Acceptor 线程只处理网络连接事件
     serverChannel.register(nioSelector, SelectionKey.OP_ACCEPT)
     startupComplete()
     try {
@@ -625,13 +652,15 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
 
                 // 如果是客户端发送过来要进行网络连接的请求
                 if (key.isAcceptable) {
+                  // 接收一个新的请求
                   accept(key).foreach { socketChannel =>
                     // Assign the channel to the next processor (using round-robin) to which the
                     // channel can be added without blocking. If newConnections queue is full on
                     // all processors, block until the last one is able to accept a connection.
+                    // 通过轮询的方式从 processors 队列中选择 Processor 来接收新的连接
+                    // 如果 Processor 里的 newConnections 队列已满，则需要阻塞等待直到任意一个 Processor 的队列非满.....
                     var retriesLeft = synchronized(processors.length)
                     var processor: Processor = null
-                    // 将不同的请求给不同的 Processor 线程处理，轮询方式
                     do {
                       retriesLeft -= 1
                       processor = synchronized {
@@ -643,6 +672,8 @@ private[kafka] class Acceptor(val endPoint: EndPoint,
                       }
                       currentProcessorIndex += 1
                       // 逻辑主要在 assignNewConnection 方法中....
+                      // mayBlock == 0 总是为 false，所以如果某个 Processor 队列满了，它会返回 false，然后进行下次循环
+                      // 继续用另一个 Processor 处理，如果所有都满，则需一直执行循环直到找到某个 Processor 的队列不为空
                     } while (!assignNewConnection(socketChannel, processor, retriesLeft == 0))
                   }
                 } else
@@ -784,6 +815,8 @@ private[kafka] class Processor(val id: Int,
     override def toString: String = s"$localHost:$localPort-$remoteHost:$remotePort-$index"
   }
 
+  // 新连接的阻塞队列，默认长度为 20
+  // Acceptor 线程接收的网络连接事件会轮询存入 Processor 线程的该队列中，并在这个线程完成连接建立...
   private val newConnections = new ArrayBlockingQueue[SocketChannel](connectionQueueSize)
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
   private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
@@ -806,6 +839,7 @@ private[kafka] class Processor(val id: Int,
   private val expiredConnectionsKilledCountMetricName = metrics.metricName("expired-connections-killed-count", "socket-server-metrics", metricTags)
   metrics.addMetric(expiredConnectionsKilledCountMetricName, expiredConnectionsKilledCount)
 
+  // 每个 Processor 内部都有独立的 Selector
   private val selector = createSelector(
     ChannelBuilders.serverChannelBuilder(listenerName,
       listenerName == config.interBrokerListenerName,
@@ -847,16 +881,18 @@ private[kafka] class Processor(val id: Int,
       while (isRunning) {
         try {
           // setup any new connections that have been queued up
-          // 读取每个 SocketChannel，并向 selector 上注册 OP_READ 事件
+          // 读取每个 SocketChannel，并向 selector 上注册 OP_READ 事件，表示可以处理客户端发送的请求
           configureNewConnections()
           // register any new responses for writing
           processNewResponses()
           // 实际处理的请求的方法，和客户端代码复用
+          // 会读取客户端发送的数据到 completedReceives 中，在后续处理
           poll()
           // 处理接收到的客户端请求（元数据拉取、客户端连接建立、客户端发送的请求）
           processCompletedReceives()
           // 处理服务端发送的响应
           processCompletedSends()
+          // 处理断开的连接
           processDisconnected()
           closeExcessConnections()
         } catch {
@@ -1134,7 +1170,7 @@ private[kafka] class Processor(val id: Int,
    */
   private def configureNewConnections(): Unit = {
     var connectionsProcessed = 0
-    // 不断获取到连接队列里的 SocketChannel
+    // 不断获取到连接队列里的 SocketChannel（从 Acceptor 线程中存入）
     while (connectionsProcessed < connectionQueueSize && !newConnections.isEmpty) {
       val channel = newConnections.poll()
       try {
