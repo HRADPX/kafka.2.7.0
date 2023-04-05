@@ -186,6 +186,9 @@ object ReplicaManager {
   )
 }
 
+/**
+ * 管理一台服务器上所有的副本
+ */
 class ReplicaManager(val config: KafkaConfig,
                      metrics: Metrics,
                      time: Time,

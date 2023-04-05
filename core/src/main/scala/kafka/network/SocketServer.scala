@@ -819,6 +819,7 @@ private[kafka] class Processor(val id: Int,
   // Acceptor 线程接收的网络连接事件会轮询存入 Processor 线程的该队列中，并在这个线程完成连接建立...
   private val newConnections = new ArrayBlockingQueue[SocketChannel](connectionQueueSize)
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
+  // 存储返回给客户端的响应
   private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
 
   private[kafka] val metricTags = mutable.LinkedHashMap(
@@ -884,13 +885,14 @@ private[kafka] class Processor(val id: Int,
           // 读取每个 SocketChannel，并向 selector 上注册 OP_READ 事件，表示可以处理客户端发送的请求
           configureNewConnections()
           // register any new responses for writing
+          // 处理服务端处理后的请求后的要发送给客户端的响应
           processNewResponses()
           // 实际处理的请求的方法，和客户端代码复用
           // 会读取客户端发送的数据到 completedReceives 中，在后续处理
           poll()
           // 处理接收到的客户端请求（元数据拉取、客户端连接建立、客户端发送的请求）
           processCompletedReceives()
-          // 处理服务端发送的响应
+          // 处理服务端已经发送的响应，会重新监听 OP_READ 事件
           processCompletedSends()
           // 处理断开的连接
           processDisconnected()
@@ -943,6 +945,7 @@ private[kafka] class Processor(val id: Int,
             // it will be unmuted immediately. If the channel has been throttled, it will be unmuted only if the
             // throttling delay has already passed by now.
             handleChannelMuteEvent(channelId, ChannelMuteEvent.RESPONSE_SENT)
+            // 重新注册 OP_READ 事件，可以继续接收客户端请求...
             tryUnmuteChannel(channelId)
 
           // 发送响应，但是实际上也没在这里发送消息，只是创建一个 SocketChannel，并注册 OP_WRITE 事件
@@ -1083,6 +1086,7 @@ private[kafka] class Processor(val id: Int,
         // it will be unmuted immediately. If the channel has been throttled, it will unmuted only if the throttling
         // delay has already passed by now.
         handleChannelMuteEvent(send.destination, ChannelMuteEvent.RESPONSE_SENT)
+        // 重新监听 OP_READ 事件
         tryUnmuteChannel(send.destination)
       } catch {
         case e: Throwable => processChannelException(send.destination,
