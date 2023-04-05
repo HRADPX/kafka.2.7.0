@@ -222,6 +222,7 @@ public class KafkaChannel implements AutoCloseable {
             remoteAddress = socketChannel.getRemoteAddress();
         }
         // 完成连接建立，取消 OP_CONNECT 事件，并注册 OP_READ 事件
+        // 这里并没有注册 OP_WRITE 事件，因为 NIO 默认是水平触发，如果注册
         boolean connected = transportLayer.finishConnect();
         if (connected) {
             if (ready()) {

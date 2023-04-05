@@ -62,10 +62,12 @@ object Kafka extends Logging {
     props
   }
 
+  // 服务端代码入口
   def main(args: Array[String]): Unit = {
     try {
       // 解析外部传递的参数
       val serverProps = getPropsFromArgs(args)
+      // 创建 kafkaServerStartable 对象
       val kafkaServerStartable = KafkaServerStartable.fromProps(serverProps)
 
       try {
@@ -80,6 +82,7 @@ object Kafka extends Logging {
       // attach shutdown handler to catch terminating signals as well as normal termination
       Exit.addShutdownHook("kafka-shutdown-hook", kafkaServerStartable.shutdown())
 
+      // 启动服务
       kafkaServerStartable.startup()
       kafkaServerStartable.awaitShutdown()
     }
