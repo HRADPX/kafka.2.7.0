@@ -16,6 +16,28 @@
  */
 package org.apache.kafka.clients.consumer;
 
+import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapter.getAssignorInstances;
+
+import java.net.InetSocketAddress;
+import java.time.Duration;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.ConcurrentModificationException;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
+
 import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.ClientDnsLookup;
 import org.apache.kafka.clients.ClientUtils;
@@ -60,28 +82,6 @@ import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
-
-import java.net.InetSocketAddress;
-import java.time.Duration;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.ConcurrentModificationException;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Properties;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Pattern;
-
-import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapter.getAssignorInstances;
 
 /**
  * A client that consumes records from a Kafka cluster.
@@ -139,6 +139,9 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * to one of the subscribed topics or when a new topic matching a {@link #subscribe(Pattern, ConsumerRebalanceListener) subscribed regex}
  * is created. The group will automatically detect the new partitions through periodic metadata refreshes and
  * assign them to members of the group.
+ * 消费组可以通过 {@link #subscribe(Collection, ConsumerRebalanceListener) subscribe} APIs 动态的设置一批想要订阅的 topics。
+ * 消费组会通过周期性的刷新元数据自动探测新的分区，并将它们分配给消费组。
+ * 一个 Kafka topic 可以有任意多个消费组，并且没有冗余数据（维护额外的消费组实际上 quite cheap）
  * <p>
  * Conceptually you can think of a consumer group as being a single logical subscriber that happens to be made up of
  * multiple processes. As a multi-subscriber system, Kafka naturally supports having any number of consumer groups for a
@@ -150,6 +153,7 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * have multiple such groups. To get semantics similar to pub-sub in a traditional messaging system each process would
  * have its own consumer group, so each process would subscribe to all the records published to the topic.
  * <p>
+ * 当消费组自动重新分配发生时，可以通过 {@link ConsumerRebalanceListener} 来通知消费者，来允许它们完成必要的应用级别的逻辑，如状态清理，手动提交 offset。
  * In addition, when group reassignment happens automatically, consumers can be notified through a {@link ConsumerRebalanceListener},
  * which allows them to finish necessary application-level logic such as state cleanup, manual offset
  * commits, etc. See <a href="#rebalancecallback">Storing Offsets Outside Kafka</a> for more details.
@@ -160,6 +164,8 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  *
  * <h3><a name="failuredetection">Detecting Consumer Failures</a></h3>
  *
+ * poll API 的设计是为确保 consumer 存活，只要你一直调用 poll 方法，consumer 就会一直在 group 中，并一直会从分配给它的分区里接收消息。
+ * 消费者会周期性发送心跳给服务端，如果消费者宕机或者在规定的时间内无法发送心跳给服务端，那么这个消费者会被认为"死亡"，它的分区会被重新分配。
  * After subscribing to a set of topics, the consumer will automatically join the group when {@link #poll(Duration)} is
  * invoked. The poll API is designed to ensure consumer liveness. As long as you continue to call poll, the consumer
  * will stay in the group and continue to receive messages from the partitions it was assigned. Underneath the covers,
@@ -167,6 +173,12 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * a duration of {@code session.timeout.ms}, then the consumer will be considered dead and its partitions will
  * be reassigned.
  * <p>
+ *
+ * todo huangran confirm it
+ * 有时尽管消费者一直发送心跳，但是它却什么都不做，这种称为"假活"（livelock）,这种场景下为了避免它一直持有分区，Kafka 提供了存活状态检测机制。
+ * 如果在规定的时间间隔 {@code max.poll.interval.ms} 内没有调用 poll 方法，客户端将主动从消费组离开，其他消费者会接管它的分区。
+ * 这时会看到调用 {@link KafkaConsumer#commitSync()}) 方法会抛出 {@link CommitFailedException} 异常。这是一种安全机制，确保只有活跃
+ * 的消费者可以提交 offsets，所以为了一直可以呆在消费组里，必须持续的调用 poll 方法。
  * It is also possible that the consumer could encounter a "livelock" situation where it is continuing
  * to send heartbeats, but no progress is being made. To prevent the consumer from holding onto its partitions
  * indefinitely in this case, we provide a liveness detection mechanism using the {@code max.poll.interval.ms}
@@ -176,6 +188,12 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * This is a safety mechanism which guarantees that only active members of the group are able to commit offsets.
  * So to stay in the group, you must continue to call poll.
  * <p>
+ * 消费者提供了两个配置来控制循环调用 poll:
+ * 1) max.poll.interval.ms: 可以调大这个参数来增加两次调用 poll 的时间的间隔，可以给 consumer 更多的时间来处理 Records。这样做的缺点是可能会
+ * 延迟消费组的 re-balance，因为消费组只有在调用 poll 方法里才会进行 re-balance. 可以通过这个参数来限制完成 re-balance 的时间，但是如果消费者
+ * 实际上不能足够频繁的调用 poll 方法，则可能会导致进度更慢。
+ * 2) max.poll.records: 使用这个参数可以限制单次调用 poll 方法返回的 Record 的数量。这样可以更轻松地预测每个轮询间隔内必须处理的最大数量。
+ * 可以通过调整这个值来减少 poll 方法调用的时间间隔，这样可以减小消费组 re-balance 带来的影响。
  * The consumer provides two configuration settings to control the behavior of the poll loop:
  * <ol>
  *     <li><code>max.poll.interval.ms</code>: By increasing the interval between expected polls, you can give
@@ -189,6 +207,7 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  *     impact of group rebalancing.</li>
  * </ol>
  * <p>
+ * todo huangran what meaning
  * For use cases where message processing time varies unpredictably, neither of these options may be sufficient.
  * The recommended way to handle these cases is to move message processing to another thread, which allows
  * the consumer to continue calling {@link #poll(Duration) poll} while the processor is still working.
@@ -221,6 +240,9 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  *             System.out.printf(&quot;offset = %d, key = %s, value = %s%n&quot;, record.offset(), record.key(), record.value());
  *     }
  * </pre>
+ *
+ * 可以通过配置 {@code bootstrap.servers} 来指定一个或多个代理服务器（brokers）来引导与集群的连接。该列表仅仅只是用来发现集群中其他的 brokers，
+ * 不需要集群中所有的服务器，但是为了避免客户端连接时 brokers 下线，一般会指定超过一个。
  *
  * The connection to the cluster is bootstrapped by specifying a list of one or more brokers to contact using the
  * configuration {@code >bootstrap.servers}. This list is just used to discover the rest of the brokers in the
@@ -281,6 +303,9 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * Kafka provides what is often called "at-least-once" delivery guarantees, as each record will likely be delivered one
  * time but in failure cases could be duplicated.
  * <p>
+ * at-least-once 机制: 每个 Record 只会被发送一次，在失败的场景下会多次。
+ * 使用自动提交的机制使用的就是 at-least-once 机制，这需要保证必须消费完所有的数据在下次调用之前或在消费者 close 方法调用之前。否则，提交的
+ * 偏移量可能会领先于消费的位置。这会导致 record 的丢失。而使用手动提交的优点是可以直接控制什么场景下一个记录被消费。
  * <b>Note: Using automatic offset commits can also give you "at-least-once" delivery, but the requirement is that
  * you must consume all data returned from each call to {@link #poll(Duration)} before any subsequent calls, or before
  * {@link #close() closing} the consumer. If you fail to do either of these, it is possible for the committed offset
@@ -291,6 +316,8 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * you may wish to have even finer control over which records have been committed by specifying an offset explicitly.
  * In the example below we commit offset after we finish handling the records in each partition.
  * <p>
+ * 更细粒度的控制 commit offset
+ * 注意: committed offset 必须是下一个要读消息的 offset，所有当调用 {@link #commitSync(Map)} 时，需要在最后一条消息的 offset 上加 1。
  * <pre>
  *     try {
  *         while(running) {
@@ -347,6 +374,7 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * Note that it isn't possible to mix manual partition assignment (i.e. using {@link #assign(Collection) assign})
  * with dynamic partition assignment through topic subscription (i.e. using {@link #subscribe(Collection) subscribe}).
  *
+ * todo huangran 没看懂
  * <h4><a name="rebalancecallback">Storing Offsets Outside Kafka</h4>
  *
  * The consumer application need not use Kafka's built-in offset storage, it can store offsets in a store of its own
@@ -393,6 +421,8 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  *
  * <h4>Controlling The Consumer's Position</h4>
  *
+ * 在大多数场景下，消费者只是简单的从头到尾消费消息，并周期性的提交 offset。但是 Kafka 允许消费者手动控制消费的位置，向前重新一些消费消息或向后
+ * 跳过一些消息进行消费。
  * In most use cases the consumer will simply consume records from beginning to end, periodically committing its
  * position (either automatically or manually). However Kafka allows the consumer to manually control its position,
  * moving forward or backwards in a partition at will. This means a consumer can re-consume older records, or skip to
@@ -400,6 +430,7 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * <p>
  * There are several instances where manually controlling the consumer's position can be useful.
  * <p>
+ * 对时间敏感的消息，可以抛弃已经落后很久的消息，直接跳到最近的消息进行消费。
  * One case is for time-sensitive record processing it may make sense for a consumer that falls far enough behind to not
  * attempt to catch up processing all records, but rather just skip to the most recent records.
  * <p>
@@ -408,10 +439,13 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * if the local state is destroyed (say because the disk is lost) the state may be recreated on a new machine by
  * re-consuming all the data and recreating the state (assuming that Kafka is retaining sufficient history).
  * <p>
+ * {@link #seek(TopicPartition, long)} 方法可以指定消费位置。
+ * {@link #seekToBeginning(Collection)} 和 {@link #seekToEnd(Collection)} 方法可以找到开始和最新的消费位置。
  * Kafka allows specifying the position using {@link #seek(TopicPartition, long)} to specify the new position. Special
  * methods for seeking to the earliest and latest offset the server maintains are also available (
  * {@link #seekToBeginning(Collection)} and {@link #seekToEnd(Collection)} respectively).
  *
+ * 消费流量控制
  * <h4>Consumption Flow Control</h4>
  *
  * If a consumer is assigned multiple partitions to fetch data from, it will try to consume from all of them at the same time,
@@ -426,6 +460,8 @@ import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapt
  * a lot of history data to catch up, the applications usually want to get the latest data on some of the topics before consider
  * fetching other topics.
  *
+ *  {@link #pause(Collection)}: 暂停消费某些分区消息
+ *  {@link #resume(Collection)}: 恢复消费某些分区的消息
  * <p>
  * Kafka supports dynamic controlling of consumption flows by using {@link #pause(Collection)} and {@link #resume(Collection)}
  * to pause the consumption on the specified assigned partitions and resume the consumption
@@ -738,6 +774,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
             int heartbeatIntervalMs = config.getInt(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG);
 
             ApiVersions apiVersions = new ApiVersions();
+            // 同生产者复用网络包的 NetworkClient
             NetworkClient netClient = new NetworkClient(
                     new Selector(config.getLong(ConsumerConfig.CONNECTIONS_MAX_IDLE_MS_CONFIG), metrics, time, metricGrpPrefix, channelBuilder, logContext),
                     this.metadata,

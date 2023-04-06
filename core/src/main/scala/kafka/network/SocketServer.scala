@@ -95,6 +95,7 @@ class SocketServer(val config: KafkaConfig,
                    val credentialProvider: CredentialProvider)
   extends Logging with KafkaMetricsGroup with BrokerReconfigurable {
 
+  // default 500
   private val maxQueuedRequests = config.queuedMaxRequests
 
   private val logContext = new LogContext(s"[SocketServer brokerId=${config.brokerId}] ")
@@ -882,17 +883,21 @@ private[kafka] class Processor(val id: Int,
       while (isRunning) {
         try {
           // setup any new connections that have been queued up
+          // 1）处理请求连接
           // 读取每个 SocketChannel，并向 selector 上注册 OP_READ 事件，表示可以处理客户端发送的请求
           configureNewConnections()
           // register any new responses for writing
-          // 处理服务端处理后的请求后的要发送给客户端的响应
+          // 5）处理服务端处理后的请求后的要发送给客户端的响应
           processNewResponses()
           // 实际处理的请求的方法，和客户端代码复用
-          // 会读取客户端发送的数据到 completedReceives 中，在后续处理
+          // 2）读数据——会读取客户端发送的数据到 completedReceives 中，在后续处理
+          // 6）写数据——会将要返回给客户端的响应写到 SocketChannel 中返回客户端
           poll()
+          // 3) 封装请求
           // 处理接收到的客户端请求（元数据拉取、客户端连接建立、客户端发送的请求）
+          // 封装存储到 RequestChannel 中的 requestQueue 阻塞队列中，后续由 dataPlaneRequestHandlerPool 线程池处理 4）
           processCompletedReceives()
-          // 处理服务端已经发送的响应，会重新监听 OP_READ 事件
+          // 7）处理服务端已经发送的响应，会重新监听 OP_READ 事件
           processCompletedSends()
           // 处理断开的连接
           processDisconnected()
@@ -948,8 +953,8 @@ private[kafka] class Processor(val id: Int,
             // 重新注册 OP_READ 事件，可以继续接收客户端请求...
             tryUnmuteChannel(channelId)
 
-          // 发送响应，但是实际上也没在这里发送消息，只是创建一个 SocketChannel，并注册 OP_WRITE 事件
-          // 复用了客户端的代码
+          // 发送响应，但是实际上也没在这里发送消息，只是将响应封装成 Send 对象保存到 KafkaChannel 中，并注册 OP_WRITE 事件
+          // 复用了客户端的代码，同样没有真正执行发送操作，发送操作还是在 poll 方法中执行的
           case response: SendResponse =>
             sendResponse(response, response.responseSend)
           case response: CloseConnectionResponse =>
@@ -1035,6 +1040,7 @@ private[kafka] class Processor(val id: Int,
                 val context = new RequestContext(header, connectionId, channel.socketAddress,
                   channel.principal, listenerName, securityProtocol,
                   channel.channelMetadataRegistry.clientInformation)
+                // 封装成请求
                 val req = new RequestChannel.Request(processor = id, context = context,
                   startTimeNanos = nowNanos, memoryPool, receive.payload, requestChannel.metrics)
                 // KIP-511: ApiVersionsRequest is intercepted here to catch the client software name
@@ -1047,13 +1053,14 @@ private[kafka] class Processor(val id: Int,
                       apiVersionsRequest.data.clientSoftwareVersion))
                   }
                 }
-                // todo huangran 这里的 requestChannel 是什么
-                // 发送到 requestQueue 队列中，实际并没有处理
-                // 后面有一个线程池 dataPlaneRequestHandlerPool 专门来处理这个队列里的事件
+                // 发送到 requestQueue 阻塞队列中，实际并没有处理
+                // 后面有一个线程池 dataPlaneRequestHandlerPool 专门来处理这个队列里的事件 [[KafkaRequestHandlerPool]]
+                // 如果这个阻塞队列满了，则会阻塞直到有空间为止，默认长度为 500，
+                // 表示在网络线程停止读取新请求之前，可以排队等待I/O线程处理的最大请求个数，
+                // 这个参数会影响服务端处理请求的能力
                 requestChannel.sendRequest(req)
                 // 移除 OP_READ 事件
                 selector.mute(connectionId)
-                // todo huangran 这里是干什么的
                 handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
               }
             }

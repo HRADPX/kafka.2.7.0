@@ -16,17 +16,18 @@
  */
 package kafka.examples;
 
-import kafka.utils.ShutdownableThread;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-
 import java.time.Duration;
 import java.util.Collections;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
+
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+
+import kafka.utils.ShutdownableThread;
 
 public class Consumer extends ShutdownableThread {
     private final KafkaConsumer<Integer, String> consumer;
@@ -45,6 +46,8 @@ public class Consumer extends ShutdownableThread {
         super("KafkaConsumerExample", false);
         this.groupId = groupId;
         Properties props = new Properties();
+        // 可以通过配置 {@code bootstrap.servers} 来指定一个或多个代理服务器（brokers）来引导消费者与集群的连接。该列表仅仅只是用来发现集群中其他的 brokers，
+        // 不需要集群中所有的服务器，但是为了避免客户端连接时 brokers 下线，一般会指定超过一个。
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KafkaProperties.KAFKA_SERVER_URL + ":" + KafkaProperties.KAFKA_SERVER_PORT);
         props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         instanceId.ifPresent(id -> props.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, id));

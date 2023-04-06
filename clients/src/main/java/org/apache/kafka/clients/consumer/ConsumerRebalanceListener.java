@@ -115,6 +115,9 @@ import org.apache.kafka.common.TopicPartition;
  *   }
  * }
  * </pre>
+ *
+ * 当分配给消费者的分区发生变化时，用户可以实现这个回调接口来触发自定义操作。
+ * 分区重分配会在消费组成员变更或订阅成员变更时触发。当进程退出、新的进程启动或旧进程失败后恢复。分区重分配也受由订阅的 topic 的影响而触发（如 topic 的分区数被管理者调整）
  */
 public interface ConsumerRebalanceListener {
 
