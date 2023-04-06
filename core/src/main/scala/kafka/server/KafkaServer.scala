@@ -293,7 +293,9 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         logDirFailureChannel = new LogDirFailureChannel(config.logDirs.size)
 
         /* start log manager */
+        // 初始化 LogManager，包括解析&创建日志文件目录，并将分区（日志文件）和 Log 的映射保存到 LogManager 中
         logManager = LogManager(config, initialOfflineDirs, zkClient, brokerState, kafkaScheduler, time, brokerTopicStats, logDirFailureChannel)
+        // 启动 logManager
         logManager.startup()
 
         metadataCache = new MetadataCache(config.brokerId)
@@ -310,8 +312,8 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         socketServer.startup(startProcessingRequests = false)
 
         /* start replica manager */
-        // 服务副本管理器
         brokerToControllerChannelManager = new BrokerToControllerChannelManagerImpl(metadataCache, time, metrics, config, threadNamePrefix)
+        // 服务副本管理器（LogManager）
         replicaManager = createReplicaManager(isShuttingDown)
         replicaManager.startup()
         brokerToControllerChannelManager.start()

@@ -618,8 +618,10 @@ class ReplicaManager(val config: KafkaConfig,
                     responseCallback: Map[TopicPartition, PartitionResponse] => Unit,
                     delayedProduceLock: Option[Lock] = None,
                     recordConversionStatsCallback: Map[TopicPartition, RecordConversionStats] => Unit = _ => ()): Unit = {
+    // 判断传过来的 acks 参数是否是合法的
     if (isValidRequiredAcks(requiredAcks)) {
       val sTime = time.milliseconds
+      // 写日志的返回结果，封装返回客户端的响应
       val localProduceResults = appendToLocalLog(internalTopicsAllowed = internalTopicsAllowed,
         origin, entriesPerPartition, requiredAcks)
       debug("Produce to local log in %d ms".format(time.milliseconds - sTime))
@@ -675,10 +677,13 @@ class ReplicaManager(val config: KafkaConfig,
     } else {
       // If required.acks is outside accepted range, something is wrong with the client
       // Just return an error and don't handle the request at all
+      // 走到这里表示 acks 是非法的，不对请求做任何处理，直接返回一个带有 Errors.INVALID_REQUIRED_ACKS 错误的响应，然后会被回调
+      // 函数返回给客户端，客户端捕获到这个异常就知道如何处理了
       val responseStatus = entriesPerPartition.map { case (topicPartition, _) =>
         topicPartition -> new PartitionResponse(Errors.INVALID_REQUIRED_ACKS,
           LogAppendInfo.UnknownLogAppendInfo.firstOffset.getOrElse(-1), RecordBatch.NO_TIMESTAMP, LogAppendInfo.UnknownLogAppendInfo.logStartOffset)
       }
+      // 最终调用回调函数，就是靠这个回调函数返回给客户端响应
       responseCallback(responseStatus)
     }
   }
@@ -941,18 +946,23 @@ class ReplicaManager(val config: KafkaConfig,
     if (traceEnabled)
       trace(s"Append [$entriesPerPartition] to local log")
 
+    // 遍历每个分区
     entriesPerPartition.map { case (topicPartition, records) =>
       brokerTopicStats.topicStats(topicPartition.topic).totalProduceRequestRate.mark()
       brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()
 
       // reject appending to internal topics if it is not allowed
+      // 如果写入的数据是 Kafka 内部的 topic，提交偏移量等
       if (Topic.isInternal(topicPartition.topic) && !internalTopicsAllowed) {
+        // 不允许抛异常
         (topicPartition, LogAppendResult(
           LogAppendInfo.UnknownLogAppendInfo,
           Some(new InvalidTopicException(s"Cannot append to internal topic ${topicPartition.topic}"))))
       } else {
         try {
+          // 找到对应写数据的分区
           val partition = getPartitionOrException(topicPartition)
+          // 将数据写入到 leader 中
           val info = partition.appendRecordsToLeader(records, origin, requiredAcks)
           val numAppendedMessages = info.numMessages
 

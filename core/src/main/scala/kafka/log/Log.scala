@@ -1813,13 +1813,15 @@ class Log(@volatile private var _dir: File,
     if (config.retentionMs < 0) return 0
     val startMs = time.milliseconds
 
+    // 默认情况下，超过七天的数据都会被删除
     def shouldDelete(segment: LogSegment, nextSegmentOpt: Option[LogSegment]): Boolean = {
       startMs - segment.largestTimestamp > config.retentionMs
     }
-
+    // 根据时间周期删除文件，如果超出时间周期，就把对应的文件删除
     deleteOldSegments(shouldDelete, RetentionMsBreach)
   }
 
+  // 根据文件大小删除
   private def deleteRetentionSizeBreachedSegments(): Int = {
     if (config.retentionSize < 0 || size < config.retentionSize) return 0
     var diff = size - config.retentionSize
