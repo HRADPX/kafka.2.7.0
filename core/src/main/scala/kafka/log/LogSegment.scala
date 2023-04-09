@@ -66,10 +66,14 @@ class LogSegment private[log] (val log: FileRecords,
 
   def timeIndex: TimeIndex = lazyTimeIndex.get
 
+  // 判断是否需要创建一个新的 segment
   def shouldRoll(rollParams: RollParams): Boolean = {
     val reachedRollMs = timeWaitedForRoll(rollParams.now, rollParams.maxTimestampInMessages) > rollParams.maxSegmentMs - rollJitterMs
+    // Kafka 默认一个 segment 大小是 1G，如果当前的 segment 大小再加上写入进去的数据大小超过 1G，就会新创建一个 segment
     size > rollParams.maxSegmentBytes - rollParams.messagesSize ||
+    // 每隔一段时间都会新建一个，但是一般不用
       (size > 0 && reachedRollMs) ||
+    // 由一定的条件
       offsetIndex.isFull || timeIndex.isFull || !canConvertToRelativeOffset(rollParams.maxOffsetInMessages)
   }
 
@@ -155,6 +159,8 @@ class LogSegment private[log] (val log: FileRecords,
       ensureOffsetInRange(largestOffset)
 
       // append the messages
+      // NIO FileChannel 写数据到磁盘（内存）
+      // 处于性能考虑，OS 会将数据缓存到内存里，所以无法保证写入到 FileChannel 里的数据一定会即时写到磁盘上。要保证这一点，需要调用 force 方法
       val appendedBytes = log.append(records)
       trace(s"Appended $appendedBytes to ${log.file} at end offset $largestOffset")
       // Update the in memory max timestamp and corresponding offset.
@@ -163,11 +169,15 @@ class LogSegment private[log] (val log: FileRecords,
         offsetOfMaxTimestampSoFar = shallowOffsetOfMaxTimestamp
       }
       // append an entry to the index (if needed)
+      // 写索引（稀疏），不是来一条数据就写一下索引，而是达到一定条件才会去索引
+      // 默认当写了 4096 字节的时候就会写一条索引
       if (bytesSinceLastIndexEntry > indexIntervalBytes) {
+        // 写索引
         offsetIndex.append(largestOffset, physicalPosition)
         timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestampSoFar)
         bytesSinceLastIndexEntry = 0
       }
+      // 当前已经写了多少字节
       bytesSinceLastIndexEntry += records.sizeInBytes
     }
   }
@@ -469,6 +479,7 @@ class LogSegment private[log] (val log: FileRecords,
   @threadsafe
   def flush(): Unit = {
     LogFlushStats.logFlushTimer.time {
+      // flush，调用 force 方法，强制把数据从内存刷新到磁盘
       log.flush()
       offsetIndex.flush()
       timeIndex.flush()

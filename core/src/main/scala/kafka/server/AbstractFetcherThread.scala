@@ -113,6 +113,7 @@ abstract class AbstractFetcherThread(name: String,
     fetcherLagStats.unregister()
   }
 
+  // 执行逻辑
   override def doWork(): Unit = {
     maybeTruncate()
     maybeFetch()
@@ -120,6 +121,7 @@ abstract class AbstractFetcherThread(name: String,
 
   private def maybeFetch(): Unit = {
     val fetchRequestOpt = inLock(partitionMapLock) {
+      // 构建请求
       val ResultWithPartitions(fetchRequestOpt, partitionsWithError) = buildFetch(partitionStates.partitionStateMap.asScala)
 
       handlePartitionsWithErrors(partitionsWithError, "maybeFetch")
@@ -133,6 +135,7 @@ abstract class AbstractFetcherThread(name: String,
     }
 
     fetchRequestOpt.foreach { case ReplicaFetch(sessionPartitions, fetchRequest) =>
+      // 处理请求
       processFetchRequest(sessionPartitions, fetchRequest)
     }
   }
@@ -298,6 +301,8 @@ abstract class AbstractFetcherThread(name: String,
 
     try {
       trace(s"Sending fetch request $fetchRequest")
+      // 从 leader 服务器拉取数据
+      /** [[kafka.server.ReplicaFetcherThread.fetchFromLeader(org.apache.kafka.common.requests.FetchRequest.Builder)]] */
       responseData = fetchFromLeader(fetchRequest)
     } catch {
       case t: Throwable =>
@@ -329,6 +334,7 @@ abstract class AbstractFetcherThread(name: String,
                 case Errors.NONE =>
                   try {
                     // Once we hand off the partition data to the subclass, we can't mess with it any more in this thread
+                    // 处理拉取到的数据
                     val logAppendInfoOpt = processPartitionData(topicPartition, currentFetchState.fetchOffset,
                       partitionData)
 

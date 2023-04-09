@@ -91,6 +91,8 @@ public final class NetworkClientUtils {
      */
     public static ClientResponse sendAndReceive(KafkaClient client, ClientRequest request, Time time) throws IOException {
         try {
+            // 发送数据
+            // 处理逻辑在 KafkaApis
             client.send(request, time.milliseconds());
             while (client.active()) {
                 List<ClientResponse> responses = client.poll(Long.MAX_VALUE, time.milliseconds());

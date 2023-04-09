@@ -117,6 +117,7 @@ abstract class AbstractFetcherManager[T <: AbstractFetcherThread](val name: Stri
 
   def addFetcherForPartitions(partitionAndOffsets: Map[TopicPartition, InitialFetchState]): Unit = {
     lock synchronized {
+      // 按照分区分组，目的是为了减少线程数量，如果 leader partition 在同一个 broker 上，只需要启动一个线程
       val partitionsPerFetcher = partitionAndOffsets.groupBy { case (topicPartition, brokerAndInitialFetchOffset) =>
         BrokerAndFetcherId(brokerAndInitialFetchOffset.leader, getFetcherId(topicPartition))
       }
@@ -129,6 +130,7 @@ abstract class AbstractFetcherManager[T <: AbstractFetcherThread](val name: Stri
         fetcherThread
       }
 
+      // 遍历所有任务，为每个任务启动一个线程
       for ((brokerAndFetcherId, initialFetchOffsets) <- partitionsPerFetcher) {
         val brokerIdAndFetcherId = BrokerIdAndFetcherId(brokerAndFetcherId.broker.id, brokerAndFetcherId.fetcherId)
         val fetcherThread = fetcherThreadMap.get(brokerIdAndFetcherId) match {
@@ -139,6 +141,7 @@ abstract class AbstractFetcherManager[T <: AbstractFetcherThread](val name: Stri
             f.shutdown()
             addAndStartFetcherThread(brokerAndFetcherId, brokerIdAndFetcherId)
           case None =>
+            // 启动线程
             addAndStartFetcherThread(brokerAndFetcherId, brokerIdAndFetcherId)
         }
 

@@ -43,11 +43,11 @@ import static org.apache.kafka.common.record.Records.LOG_OVERHEAD;
  * RecordBatch implementation for magic 2 and above. The schema is given below:
  *
  * RecordBatch =>
- *  BaseOffset => Int64
- *  Length => Int32
- *  PartitionLeaderEpoch => Int32
- *  Magic => Int8
- *  CRC => Uint32
+ *  BaseOffset => Int64                // baseOffset
+ *  Length => Int32                    // 消息长度
+ *  PartitionLeaderEpoch => Int32      // 版本
+ *  Magic => Int8                      // magic
+ *  CRC => Uint32                      // 校验数据
  *  Attributes => Int16
  *  LastOffsetDelta => Int32 // also serves as LastSequenceDelta
  *  FirstTimestamp => Int64

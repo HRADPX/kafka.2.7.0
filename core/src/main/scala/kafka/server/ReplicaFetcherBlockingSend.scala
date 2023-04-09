@@ -105,8 +105,10 @@ class ReplicaFetcherBlockingSend(sourceBroker: BrokerEndPoint,
       if (!NetworkClientUtils.awaitReady(networkClient, sourceNode, time, socketTimeout))
         throw new SocketTimeoutException(s"Failed to connect within $socketTimeout ms")
       else {
+        // 封装成 ClientRequest 对象
         val clientRequest = networkClient.newClientRequest(sourceBroker.id.toString, requestBuilder,
           time.milliseconds(), true)
+        // 发送请求
         NetworkClientUtils.sendAndReceive(networkClient, clientRequest, time)
       }
     }

@@ -143,7 +143,9 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
       require(!isFull, "Attempt to append to a full index (size = " + _entries + ").")
       if (_entries == 0 || offset > _lastOffset) {
         trace(s"Adding index entry $offset => $position to ${file.getAbsolutePath}")
+        // offset: 逻辑上的位置
         mmap.putInt(relativeOffset(offset))
+        // 物理位置，这个消息再磁盘的哪个位置
         mmap.putInt(position)
         _entries += 1
         _lastOffset = offset

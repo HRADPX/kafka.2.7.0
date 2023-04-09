@@ -136,7 +136,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       request.header.apiKey match {
         // 处理生产者发送过来的请求
         case ApiKeys.PRODUCE => handleProduceRequest(request)
-        // 拉取元数据
+        // follower 拉取数据同步
         case ApiKeys.FETCH => handleFetchRequest(request)
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
@@ -784,6 +784,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
 
     // the callback for process a fetch response, invoked before throttling
+    // 拉取的回调函数
     def processResponseCallback(responsePartitionData: Seq[(TopicPartition, FetchPartitionData)]): Unit = {
       val partitions = new util.LinkedHashMap[TopicPartition, FetchResponse.PartitionData[Records]]
       val reassigningPartitions = mutable.Set[TopicPartition]()
@@ -878,6 +879,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         }
 
         // Send the response immediately.
+        // 返回响应，复用之前的逻辑，存到 responseQueue 队列中
         sendResponse(request, Some(createResponse(maxThrottleTimeMs)), Some(updateConversionStats))
       }
     }
@@ -890,12 +892,15 @@ class KafkaApis(val requestChannel: RequestChannel,
     else
       quotas.fetch.getMaxValueInQuotaWindow(request.session, clientId).toInt
 
+    // 拉取的最大数据
     val fetchMaxBytes = Math.min(Math.min(fetchRequest.maxBytes, config.fetchMaxBytes), maxQuotaWindowBytes)
+    // 拉取的最小数据
     val fetchMinBytes = Math.min(fetchRequest.minBytes, fetchMaxBytes)
     if (interesting.isEmpty)
       processResponseCallback(Seq.empty)
     else {
       // call the replica manager to fetch messages from the local replica
+      // 拉取数据
       replicaManager.fetchMessages(
         fetchRequest.maxWait.toLong,
         fetchRequest.replicaId,
@@ -904,7 +909,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         versionId <= 2,
         interesting,
         replicationQuota(fetchRequest),
-        processResponseCallback,
+        processResponseCallback,  // 执行完成会调用这个回调函数
         fetchRequest.isolationLevel,
         clientMetadata)
     }

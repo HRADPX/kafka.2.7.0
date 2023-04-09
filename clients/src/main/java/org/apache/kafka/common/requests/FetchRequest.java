@@ -60,6 +60,7 @@ public class FetchRequest extends AbstractRequest {
     }
 
     public static final class PartitionData {
+        // 带上自己的 offset
         public final long fetchOffset;
         public final long logStartOffset;
         public final int maxBytes;

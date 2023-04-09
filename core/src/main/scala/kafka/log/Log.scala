@@ -283,6 +283,10 @@ class Log(@volatile private var _dir: File,
    * equals the log end offset (which may never happen for a partition under consistent load). This is needed to
    * prevent the log start offset (which is exposed in fetch responses) from getting ahead of the high watermark.
    */
+  // HW，该值是 ISR 列表里 replica 的 LEO 的最小值，表示在 HW 值之前的数据消费者才能看到（因为所有的副本都已经完成同步）
+  // 会有一个定时的任务会更新的 ISR 列表，如果有 replica 长时间（默认 10s）没有去 leader partition 去更新数据，会将
+  // 该 replica 从 ISR 列表中移除出去。因为如果其他的 replica 都完成的数据的同步，只有某个 replica 的没有同步，会导致
+  // 消费者可见的数据受到这个最小的 LEO 影响。
   @volatile private var highWatermarkMetadata: LogOffsetMetadata = LogOffsetMetadata(logStartOffset)
 
   /* the actual segments of the log */
@@ -1091,6 +1095,7 @@ class Log(@volatile private var _dir: File,
                      leaderEpoch: Int,
                      ignoreRecordSize: Boolean): LogAppendInfo = {
     maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
+      // 1) 校验数据
       val appendInfo = analyzeAndValidateRecords(records, origin, ignoreRecordSize)
 
       // return if we have no valid messages or if this is a duplicate of the last appended entry
@@ -1105,6 +1110,7 @@ class Log(@volatile private var _dir: File,
         checkIfMemoryMappedBufferClosed()
         if (assignOffsets) {
           // assign offsets to the message set
+          // 2) 分配 offset
           val offset = new LongRef(nextOffsetMetadata.messageOffset)
           appendInfo.firstOffset = Some(offset.value)
           val now = time.milliseconds
@@ -1128,6 +1134,7 @@ class Log(@volatile private var _dir: File,
             case e: IOException =>
               throw new KafkaException(s"Error validating messages while appending to log $name", e)
           }
+          // 3）获取合法数据
           validRecords = validateAndOffsetAssignResult.validatedRecords
           appendInfo.maxTimestamp = validateAndOffsetAssignResult.maxTimestamp
           appendInfo.offsetOfMaxTimestamp = validateAndOffsetAssignResult.shallowOffsetOfMaxTimestamp
@@ -1197,6 +1204,7 @@ class Log(@volatile private var _dir: File,
         }
 
         // maybe roll the log if this segment is full
+        // 4) 获取一个可用的 segment
         val segment = maybeRoll(validRecords.sizeInBytes, appendInfo)
 
         val logOffsetMetadata = LogOffsetMetadata(
@@ -1217,6 +1225,7 @@ class Log(@volatile private var _dir: File,
           return appendInfo
         }
 
+        // 5) 把数据写入到 segment
         segment.append(largestOffset = appendInfo.lastOffset,
           largestTimestamp = appendInfo.maxTimestamp,
           shallowOffsetOfMaxTimestamp = appendInfo.offsetOfMaxTimestamp,
@@ -1228,6 +1237,7 @@ class Log(@volatile private var _dir: File,
         // will be cleaned up after the log directory is recovered. Note that the end offset of the
         // ProducerStateManager will not be updated and the last stable offset will not advance
         // if the append to the transaction index fails.
+        // 6) 更新 LEO（lastEndOffset）
         updateLogEndOffset(appendInfo.lastOffset + 1)
 
         // update the producer state
@@ -1255,7 +1265,10 @@ class Log(@volatile private var _dir: File,
           s"next offset: ${nextOffsetMetadata.messageOffset}, " +
           s"and messages: $validRecords")
 
+        // 7) 根据条件判断，然后把内存里的数据写到磁盘
+        // config.flushInterval: 默认是 Long.MAX_VALUE
         if (unflushedMessages >= config.flushInterval)
+        // 永远不会执行 flush 操作，由操作系统去管理
           flush()
 
         appendInfo
@@ -1877,6 +1890,7 @@ class Log(@volatile private var _dir: File,
    * @return The currently active segment after (perhaps) rolling to a new segment
    */
   private def maybeRoll(messagesSize: Int, appendInfo: LogAppendInfo): LogSegment = {
+    // 获取当前最新的 segment
     val segment = activeSegment
     val now = time.milliseconds
 
@@ -1901,6 +1915,7 @@ class Log(@volatile private var _dir: File,
         Note that this is only required for pre-V2 message formats because these do not store the first message offset
         in the header.
       */
+      // 新建一个 segment
       appendInfo.firstOffset match {
         case Some(firstOffset) => roll(Some(firstOffset))
         case None => roll(Some(maxOffsetInMessages - Integer.MAX_VALUE))
@@ -1921,9 +1936,13 @@ class Log(@volatile private var _dir: File,
       val start = time.hiResClockMs()
       lock synchronized {
         checkIfMemoryMappedBufferClosed()
+        // 获取 LEO 的值作为最新的一个偏移量
         val newOffset = math.max(expectedNextOffset.getOrElse(0L), logEndOffset)
+        // 新建一个文件，用 LEO 的名字作为文件名
         val logFile = Log.logFile(dir, newOffset)
 
+        // todo huangran 为什么会存在
+        // 如果文件已经存在，删除文件
         if (segments.containsKey(newOffset)) {
           // segment with the same base offset already exists and loaded
           if (activeSegment.baseOffset == newOffset && activeSegment.size == 0) {
@@ -1944,6 +1963,7 @@ class Log(@volatile private var _dir: File,
             s"Trying to roll a new log segment for topic partition $topicPartition with " +
             s"start offset $newOffset =max(provided offset = $expectedNextOffset, LEO = $logEndOffset) lower than start offset of the active segment $activeSegment")
         } else {
+          // 索引文件
           val offsetIdxFile = offsetIndexFile(dir, newOffset)
           val timeIdxFile = timeIndexFile(dir, newOffset)
           val txnIdxFile = transactionIndexFile(dir, newOffset)
@@ -1964,6 +1984,7 @@ class Log(@volatile private var _dir: File,
         producerStateManager.updateMapEndOffset(newOffset)
         producerStateManager.takeSnapshot()
 
+        // 新建一个 segment
         val segment = LogSegment.open(dir,
           baseOffset = newOffset,
           config,
@@ -1971,6 +1992,7 @@ class Log(@volatile private var _dir: File,
           fileAlreadyExists = false,
           initFileSize = initFileSize,
           preallocate = config.preallocate)
+        // 将新的 segment 添加到 segments 中（跳表实现，为了能根据 offset 快速定位到 segment）
         addSegment(segment)
 
         // We need to update the segment base offset and append position data of the metadata when log rolls.
@@ -2008,6 +2030,7 @@ class Log(@volatile private var _dir: File,
         return
       debug(s"Flushing log up to offset $offset, last flushed: $lastFlushTime,  current time: ${time.milliseconds()}, " +
         s"unflushed: $unflushedMessages")
+      // 遍历所有当前主机的所有的 segment
       for (segment <- logSegments(this.recoveryPoint, offset))
         segment.flush()
 

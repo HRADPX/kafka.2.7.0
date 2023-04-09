@@ -46,6 +46,7 @@ public class MemoryRecords extends AbstractRecords {
 
     private final ByteBuffer buffer;
 
+    // todo huangran 消息的格式
     private final Iterable<MutableRecordBatch> batches = this::batchIterator;
 
     private int validBytes = -1;
@@ -86,6 +87,7 @@ public class MemoryRecords extends AbstractRecords {
         buffer.mark();
         int written = 0;
         while (written < sizeInBytes())
+            // 调用 FileChannel 去写数据
             written += channel.write(buffer);
         buffer.reset();
         return written;
