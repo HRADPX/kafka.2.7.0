@@ -49,6 +49,7 @@ class QueuedEvent(val event: ControllerEvent,
     if (spent.getAndSet(true))
       return
     processingStarted.countDown()
+    // 执行事件 KafkaController
     processor.process(event)
   }
 
@@ -114,10 +115,14 @@ class ControllerEventManager(controllerId: Int,
 
   def isEmpty: Boolean = queue.isEmpty
 
+  /**
+   * 实现了 [[ShutdownableThread]]， 主要逻辑在 doWork() 方法里面
+   */
   class ControllerEventThread(name: String) extends ShutdownableThread(name = name, isInterruptible = false) {
     logIdent = s"[ControllerEventThread controllerId=$controllerId] "
 
     override def doWork(): Unit = {
+      // KafkaServer 启动的时候会注册了 StartUp 事件
       val dequeued = pollFromEventQueue()
       dequeued.event match {
         case ShutdownEventThread => // The shutting down of the thread has been initiated at this point. Ignore this event.
@@ -127,6 +132,7 @@ class ControllerEventManager(controllerId: Int,
           eventQueueTimeHist.update(time.milliseconds() - dequeued.enqueueTimeMs)
 
           try {
+            // 执行事件，首次启动是 StartUp 事件
             def process(): Unit = dequeued.process(processor)
 
             rateAndTimeMetrics.get(state) match {

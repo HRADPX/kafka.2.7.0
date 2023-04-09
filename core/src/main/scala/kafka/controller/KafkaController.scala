@@ -157,6 +157,7 @@ class KafkaController(val config: KafkaConfig,
    * elector
    */
   def startup() = {
+    // 对 zk 上面的目录（controller-state-change-handler）注册了监听器
     zkClient.registerStateChangeHandler(new StateChangeHandler {
       override val name: String = StateChangeHandlers.ControllerHandler
       override def afterInitializingSession(): Unit = {
@@ -171,6 +172,7 @@ class KafkaController(val config: KafkaConfig,
       }
     })
     eventManager.put(Startup)
+    // eventManager 里的线程启动
     eventManager.start()
   }
 
@@ -1413,7 +1415,9 @@ class KafkaController(val config: KafkaConfig,
   }
 
   private def processStartup(): Unit = {
+    // 向 zk 的 controller 目录下注册一个 controller 变更事件
     zkClient.registerZNodeChangeHandlerAndCheckExistence(controllerChangeHandler)
+    // 执行选举过程
     elect()
   }
 
@@ -1491,6 +1495,7 @@ class KafkaController(val config: KafkaConfig,
   }
 
   private def elect(): Unit = {
+    // 从 controller 目录下获取数
     activeControllerId = zkClient.getControllerId.getOrElse(-1)
     /*
      * We can get here during the initial startup and the handleDeleted ZK callback. Because of the potential race condition,
@@ -2431,6 +2436,7 @@ class KafkaController(val config: KafkaConfig,
         case AlterIsrReceived(brokerId, brokerEpoch, isrsToAlter, callback) =>
           processAlterIsr(brokerId, brokerEpoch, isrsToAlter, callback)
         case Startup =>
+          // 启动会执行选举过程
           processStartup()
       }
     } catch {

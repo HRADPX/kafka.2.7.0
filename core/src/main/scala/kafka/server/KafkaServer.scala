@@ -329,7 +329,10 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         tokenManager.startup()
 
         /* start kafka controller */
+        // 启动 Kafka Controller
+        // 启动完成后，需要选举一个节点作为 controller 作为主节点用来管理整个 Kafka 集群
         kafkaController = new KafkaController(config, zkClient, time, metrics, brokerInfo, brokerEpoch, tokenManager, brokerFeatures, featureCache, threadNamePrefix)
+        // 选举
         kafkaController.startup()
 
         adminManager = new AdminManager(config, metrics, metadataCache, zkClient)
@@ -476,6 +479,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
       zkClient.close()
     }
 
+    // 创建 zk client
     _zkClient = createZkClient(config.zkConnect, secureAclsEnabled)
     _zkClient.createTopLevelPaths()
   }
