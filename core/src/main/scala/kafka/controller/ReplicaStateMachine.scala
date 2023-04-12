@@ -175,6 +175,7 @@ class ZkReplicaStateMachine(config: KafkaConfig,
                 val exception = new StateChangeFailedException(s"Replica $replicaId for partition $partition cannot be moved to NewReplica state as it is being requested to become leader")
                 logFailedStateChange(replica, currentState, OfflineReplica, exception)
               } else {
+                //
                 controllerBrokerRequestBatch.addLeaderAndIsrRequestForBrokers(Seq(replicaId),
                   replica.topicPartition,
                   leaderIsrAndControllerEpoch,

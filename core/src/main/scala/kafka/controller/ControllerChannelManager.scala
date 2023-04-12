@@ -229,6 +229,7 @@ class RequestSendThread(val controllerId: Int,
 
   private val socketTimeoutMs = config.controllerSocketTimeoutMs
 
+  // 新 broker 加入时发送元数据更新请求
   override def doWork(): Unit = {
 
     def backoff(): Unit = pause(100, TimeUnit.MILLISECONDS)
@@ -250,6 +251,7 @@ class RequestSendThread(val controllerId: Int,
           else {
             val clientRequest = networkClient.newClientRequest(brokerNode.idString, requestBuilder,
               time.milliseconds(), true)
+            // 发送请求，处理逻辑在 KafkaApis
             clientResponse = NetworkClientUtils.sendAndReceive(networkClient, clientRequest, time)
             isSendSuccessful = true
           }
@@ -392,6 +394,7 @@ abstract class AbstractControllerBrokerRequestBatch(config: KafkaConfig,
         .setIsNew(isNew || alreadyNew))
     }
 
+    // 发送更新元数据请求
     addUpdateMetadataRequestForBrokers(controllerContext.liveOrShuttingDownBrokerIds.toSeq, Set(topicPartition))
   }
 
@@ -535,8 +538,11 @@ abstract class AbstractControllerBrokerRequestBatch(config: KafkaConfig,
 
     updateMetadataRequestBrokerSet.intersect(controllerContext.liveOrShuttingDownBrokerIds).foreach { broker =>
       val brokerEpoch = controllerContext.liveBrokerIdAndEpochs(broker)
+      // 构建请求
+      // ApiKeys.UPDATE_METADATA
       val updateMetadataRequestBuilder = new UpdateMetadataRequest.Builder(updateMetadataRequestVersion,
         controllerId, controllerEpoch, brokerEpoch, partitionStates.asJava, liveBrokers.asJava)
+      // 发送更新元数据请求
       sendRequest(broker, updateMetadataRequestBuilder, (r: AbstractResponse) => {
         val updateMetadataResponse = r.asInstanceOf[UpdateMetadataResponse]
         sendEvent(UpdateMetadataResponseReceived(updateMetadataResponse, broker))

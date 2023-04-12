@@ -234,6 +234,7 @@ class KafkaController(val config: KafkaConfig,
     info("Registering handlers")
 
     // before reading source of truth from zookeeper, register the listeners to get broker/topic callbacks
+    // 注册一些监听器，用来监听 zk 目录的变化，通过监听这些目录的变化来管理 Kafka 集群的。
     val childChangeHandlers = Seq(brokerChangeHandler, topicChangeHandler, topicDeletionHandler, logDirEventNotificationHandler,
       isrChangeNotificationHandler)
     childChangeHandlers.foreach(zkClient.registerZNodeChildChangeHandler)
@@ -1495,22 +1496,26 @@ class KafkaController(val config: KafkaConfig,
   }
 
   private def elect(): Unit = {
-    // 从 controller 目录下获取数
+    // 从 controller 目录下获取数，如果获取到了数据，返回一个 id 号，这个 id 号就是某个 broker 的 id 号，也就是这个 broker 就是 controller
     activeControllerId = zkClient.getControllerId.getOrElse(-1)
     /*
      * We can get here during the initial startup and the handleDeleted ZK callback. Because of the potential race condition,
      * it's possible that the controller has already been elected when we get here. This check will prevent the following
      * createEphemeralPath method from getting into an infinite loop if this broker is already the controller.
      */
+    // 之前有 broker 已经在 zk 上写过，直接返回
     if (activeControllerId != -1) {
       debug(s"Broker $activeControllerId has been elected as the controller, so stopping the election process.")
       return
     }
 
+    // 首次启动
     try {
+      // 在 zk 上创建目录
       val (epoch, epochZkVersion) = zkClient.registerControllerAndIncrementControllerEpoch(config.brokerId)
       controllerContext.epoch = epoch
       controllerContext.epochZkVersion = epochZkVersion
+      // 当前的 broker 就是 controller
       activeControllerId = config.brokerId
 
       info(s"${config.brokerId} successfully elected as the controller. Epoch incremented to ${controllerContext.epoch} " +

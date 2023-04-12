@@ -319,6 +319,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         brokerToControllerChannelManager.start()
 
         val brokerInfo = createBrokerInfo
+        // 注册 broker（在 zk 上的 /brokers/ids 创建临时目录）
         val brokerEpoch = zkClient.registerBroker(brokerInfo)
 
         // Now that the broker is successfully registered, checkpoint its metadata
@@ -366,6 +367,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
             KafkaServer.MIN_INCREMENTAL_FETCH_SESSION_EVICTION_MS))
 
         /* start processing requests */
+        // 创建 KafkaApis，Kafka 客户端请求最终都是这个类来处理的
         dataPlaneRequestProcessor = new KafkaApis(socketServer.dataPlaneRequestChannel, replicaManager, adminManager, groupCoordinator, transactionCoordinator,
           kafkaController, zkClient, config.brokerId, config, metadataCache, metrics, authorizer, quotaManagers,
           fetchManager, brokerTopicStats, clusterId, time, tokenManager, brokerFeatures, featureCache)

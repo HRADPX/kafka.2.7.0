@@ -91,7 +91,10 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     * @return broker epoch (znode create transaction id)
     */
   def registerBroker(brokerInfo: BrokerInfo): Long = {
+    // broker path  --> /brokers/ids/0
     val path = brokerInfo.path
+    // brokerInfo.toJsonBytes: 封装 broker 的信息（如 host、port、version 等）
+    // 在 zk 上创建临时目录并写入信息
     val stat = checkedEphemeralCreate(path, brokerInfo.toJsonBytes)
     info(s"Registered broker ${brokerInfo.broker.id} at path $path with addresses: " +
       s"${brokerInfo.broker.endPoints.map(_.connectionString).mkString(",")}, czxid (broker epoch): ${stat.getCzxid}")
@@ -109,6 +112,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
 
     // Read /controller_epoch to get the current controller epoch and zkVersion,
     // create /controller_epoch with initial value if not exists
+    // 获取当前 controller 的 epoch 和 zk 版本，如果不存在，则创建
     val (curEpoch, curEpochZkVersion) = getControllerEpoch
       .map(e => (e._1, e._2.getVersion))
       .getOrElse(maybeCreateControllerEpochZNode())
@@ -1739,6 +1743,7 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
   private def checkedEphemeralCreate(path: String, data: Array[Byte]): Stat = {
     val checkedEphemeral = new CheckedEphemeral(path, data)
     info(s"Creating $path (is it secure? $isSecure)")
+    // 向 zk 发送请求
     val stat = checkedEphemeral.create()
     info(s"Stat of the created znode at $path is: $stat")
     stat
