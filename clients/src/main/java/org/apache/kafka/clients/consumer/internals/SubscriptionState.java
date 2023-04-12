@@ -16,19 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import org.apache.kafka.clients.ApiVersions;
-import org.apache.kafka.clients.Metadata;
-import org.apache.kafka.clients.NodeApiVersions;
-import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
-import org.apache.kafka.clients.consumer.NoOffsetForPartitionException;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.clients.consumer.OffsetResetStrategy;
-import org.apache.kafka.common.IsolationLevel;
-import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.internals.PartitionStates;
-import org.apache.kafka.common.requests.EpochEndOffset;
-import org.apache.kafka.common.utils.LogContext;
-import org.slf4j.Logger;
+import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -46,7 +34,19 @@ import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
-import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
+import org.apache.kafka.clients.ApiVersions;
+import org.apache.kafka.clients.Metadata;
+import org.apache.kafka.clients.NodeApiVersions;
+import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
+import org.apache.kafka.clients.consumer.NoOffsetForPartitionException;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.OffsetResetStrategy;
+import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.internals.PartitionStates;
+import org.apache.kafka.common.requests.EpochEndOffset;
+import org.apache.kafka.common.utils.LogContext;
+import org.slf4j.Logger;
 
 /**
  * A class for tracking the topics, partitions, and offsets for the consumer. A partition
@@ -83,6 +83,7 @@ public class SubscriptionState {
     private Pattern subscribedPattern;
 
     /* the list of topics the user has requested */
+    // 保存订阅的 topics
     private Set<String> subscription;
 
     /* The list of topics the group has subscribed to. This may include some topics which are not part
@@ -97,6 +98,7 @@ public class SubscriptionState {
     private final OffsetResetStrategy defaultResetStrategy;
 
     /* User-provided listener to be invoked when assignment changes */
+    // 用户提供的 re-balanceListener，当分区分配变更时会调用这个监听器
     private ConsumerRebalanceListener rebalanceListener;
 
     private int assignmentId = 0;
@@ -161,8 +163,11 @@ public class SubscriptionState {
     }
 
     public synchronized boolean subscribe(Set<String> topics, ConsumerRebalanceListener listener) {
+        // 注册监听器
         registerRebalanceListener(listener);
+        // 设置 SubscriptionType
         setSubscriptionType(SubscriptionType.AUTO_TOPICS);
+        // 判断订阅的 topic 是否发生变更
         return changeSubscription(topics);
     }
 
@@ -184,6 +189,7 @@ public class SubscriptionState {
         if (subscription.equals(topicsToSubscribe))
             return false;
 
+        // subscription 保存了已经订阅的主题，这里看到 consumer.subscribe() 方法订阅 topic 不是追加的，而是直接覆盖
         subscription = topicsToSubscribe;
         return true;
     }
@@ -400,6 +406,7 @@ public class SubscriptionState {
 
     /**
      * @return a modifiable copy of the currently assigned partitions
+     * 返回已经被分配的分区
      */
     public synchronized Set<TopicPartition> assignedPartitions() {
         return new HashSet<>(this.assignment.partitionSet());
@@ -739,6 +746,7 @@ public class SubscriptionState {
     private static class TopicPartitionState {
 
         private FetchState fetchState;
+        // 上次消费的 position
         private FetchPosition position; // last consumed position
 
         private Long highWatermark; // the high watermark from last fetch

@@ -31,11 +31,13 @@ public final class Heartbeat {
     private final GroupRebalanceConfig rebalanceConfig;
     private final Time time;
     private final Timer heartbeatTimer;
+    // 记录两次收到心跳的时间间隔
     private final Timer sessionTimer;
     private final Timer pollTimer;
     private final Logger log;
 
     private volatile long lastHeartbeatSend = 0L;
+    // 心跳发送标记
     private volatile boolean heartbeatInFlight = false;
 
     public Heartbeat(GroupRebalanceConfig config,
@@ -71,7 +73,9 @@ public final class Heartbeat {
     void sentHeartbeat(long now) {
         lastHeartbeatSend = now;
         heartbeatInFlight = true;
+        // 更新当前时间等
         update(now);
+        // 重置 ddlTime
         heartbeatTimer.reset(rebalanceConfig.heartbeatIntervalMs);
 
         if (log.isTraceEnabled()) {
@@ -88,7 +92,9 @@ public final class Heartbeat {
     }
 
     void receiveHeartbeat() {
+        // 更新时间
         update(time.milliseconds());
+        // 更新下成功标记
         heartbeatInFlight = false;
         sessionTimer.reset(rebalanceConfig.sessionTimeoutMs);
     }

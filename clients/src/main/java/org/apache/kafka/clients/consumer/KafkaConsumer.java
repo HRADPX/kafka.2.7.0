@@ -460,13 +460,14 @@ import org.slf4j.Logger;
  * a lot of history data to catch up, the applications usually want to get the latest data on some of the topics before consider
  * fetching other topics.
  *
- *  {@link #pause(Collection)}: 暂停消费某些分区消息
- *  {@link #resume(Collection)}: 恢复消费某些分区的消息
+ * {@link #pause(Collection)}: 暂停消费某些分区消息
+ * {@link #resume(Collection)}: 恢复消费某些分区的消息
  * <p>
  * Kafka supports dynamic controlling of consumption flows by using {@link #pause(Collection)} and {@link #resume(Collection)}
  * to pause the consumption on the specified assigned partitions and resume the consumption
  * on the specified paused partitions respectively in the future {@link #poll(Duration)} calls.
  *
+ * todo huangran see later
  * <h3>Reading Transactional Messages</h3>
  *
  * <p>
@@ -497,10 +498,12 @@ import org.slf4j.Logger;
  *
  * <h3><a name="multithreaded">Multi-threaded Processing</a></h3>
  *
+ * Kafka consumer 不是线程安全的。所有的网络 I/O 都发生在调用应用程序的线程中。需要用户保证多线程访问的安全性。
  * The Kafka consumer is NOT thread-safe. All network I/O happens in the thread of the application
  * making the call. It is the responsibility of the user to ensure that multi-threaded access
  * is properly synchronized. Un-synchronized access will result in {@link ConcurrentModificationException}.
  *
+ * 可以通过 wakeUp() 中断其他线程的消费
  * <p>
  * The only exception to this rule is {@link #wakeup()}, which can safely be used from an external thread to
  * interrupt an active operation. In this case, a {@link org.apache.kafka.common.errors.WakeupException} will be
@@ -608,6 +611,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     private Logger log;
     private final String clientId;
     private final Optional<String> groupId;
+    // 消费者协调器
     private final ConsumerCoordinator coordinator;
     private final Deserializer<K> keyDeserializer;
     private final Deserializer<V> valueDeserializer;
@@ -626,6 +630,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
     // currentThread holds the threadId of the current thread accessing KafkaConsumer
     // and is used to prevent multi-threaded access
+    // Kafka Consumer 不是线程安全的，使用这个记录当前处理的线程id，避免多线程操作
     private final AtomicLong currentThread = new AtomicLong(NO_CURRENT_THREAD);
     // refcount is used to allow reentrant access by the thread who has acquired currentThread
     private final AtomicInteger refcount = new AtomicInteger(0);
@@ -802,6 +807,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                     config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG),
                     heartbeatIntervalMs); //Will avoid blocking an extended period of time to prevent heartbeat thread starvation
 
+            // 分区分配策略，默认是 RangeAssignor
             this.assignors = getAssignorInstances(config.getList(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG), config.originals());
 
             // no coordinator will be constructed for the default (null) group id
@@ -819,6 +825,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                         config.getInt(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG),
                         this.interceptors,
                         config.getBoolean(ConsumerConfig.THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED));
+            // Fetcher，从服务端拉数据
             this.fetcher = new Fetcher<>(
                     logContext,
                     this.client,
@@ -965,6 +972,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * Note that rebalances will only occur during an active call to {@link #poll(Duration)}, so callbacks will
      * also only be invoked during that time.
      *
+     * todo huangran what meaning
      * The provided listener will immediately override any listener set in a previous call to subscribe.
      * It is guaranteed, however, that the partitions revoked/assigned through this interface are from topics
      * subscribed in this call. See {@link ConsumerRebalanceListener} for more details.
@@ -986,6 +994,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 throw new IllegalArgumentException("Topic collection to subscribe to cannot be null");
             if (topics.isEmpty()) {
                 // treat subscribing to empty topic list as the same as unsubscribing
+                // 取消订阅
                 this.unsubscribe();
             } else {
                 for (String topic : topics) {
@@ -993,6 +1002,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                         throw new IllegalArgumentException("Topic collection to subscribe to cannot contain null or empty topic");
                 }
 
+                // 校验分区分配策略是否为空
                 throwIfNoAssignorsConfigured();
                 fetcher.clearBufferedDataForUnassignedTopics(topics);
                 log.info("Subscribed to topic(s): {}", Utils.join(topics, ", "));
@@ -1024,6 +1034,11 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @throws IllegalStateException If {@code subscribe()} is called previously with pattern, or assign is called
      *                               previously (without a subsequent call to {@link #unsubscribe()}), or if not
      *                               configured at-least one partition assignment strategy
+     *
+     * 订阅给定的 topics 并且动态分配分区。
+     * topic 的订阅不是追加的，当前的 topics 会替换原先的（如果存在）。如果给定的 topics 是一个空列表，等效于取消订阅方法。
+     * 如果需要在 re-balance 时管理 offset，可以调用 {@link #subscribe(Collection, ConsumerRebalanceListener)} 方法，并
+     * 提供自己的 listener，re-balance 时会导致 offset 重置，listener 可以在 re-balance 结束时提供一个机会去 commit offsets。
      */
     @Override
     public void subscribe(Collection<String> topics) {
@@ -1251,6 +1266,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         try {
             this.kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs());
 
+            // 校验订阅方式
             if (this.subscriptions.hasNoSubscriptionOrUserAssignment()) {
                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
             }
@@ -1260,6 +1276,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
                 if (includeMetadataInTimeout) {
                     // try to update assignment metadata BUT do not need to block on the timer for join group
+                    // 更新元数据、加入用户组、执行再平衡等操作
                     updateAssignmentMetadataIfNeeded(timer, false);
                 } else {
                     while (!updateAssignmentMetadataIfNeeded(time.timer(Long.MAX_VALUE), true)) {
@@ -1295,6 +1312,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
             return false;
         }
 
+        // 更新 offset
         return updateFetchPositions(timer);
     }
 
@@ -1306,12 +1324,14 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 Math.min(coordinator.timeToNextPoll(timer.currentTimeMs()), timer.remainingMs());
 
         // if data is available already, return it immediately
+        // 首次拉取，这里返回的 records 是空集合
         final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = fetcher.fetchedRecords();
         if (!records.isEmpty()) {
             return records;
         }
 
         // send any new fetches (won't resend pending fetches)
+        // 发送拉取数据的请求
         fetcher.sendFetches();
 
         // We do not want to be stuck blocking in poll if we are missing some positions

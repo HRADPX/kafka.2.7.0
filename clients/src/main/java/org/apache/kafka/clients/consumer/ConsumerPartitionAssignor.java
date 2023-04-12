@@ -93,8 +93,10 @@ public interface ConsumerPartitionAssignor {
     String name();
 
     final class Subscription {
+        // 消费者订阅的 topics
         private final List<String> topics;
         private final ByteBuffer userData;
+        // 消费者拥有的分区列表
         private final List<TopicPartition> ownedPartitions;
         private Optional<String> groupInstanceId;
 
@@ -176,6 +178,11 @@ public interface ConsumerPartitionAssignor {
         }
     }
 
+    /**
+     * 分配结果
+     * key: memberId
+     * value: 分配的分区列表
+     */
     final class GroupAssignment {
         private final Map<String, Assignment> assignments;
 
@@ -204,6 +211,11 @@ public interface ConsumerPartitionAssignor {
      * immediately, but instead may indicate consumers the need for partition revocation so that the revoked
      * partitions can be reassigned to other consumers in the next rebalance event. This is designed for sticky assignment
      * logic which attempts to minimize partition reassignment with cooperative adjustments.
+     *
+     * {@link RebalanceProtocol#EAGER} 这个协议需要消费者在再平衡事件前撤销其所有的分区，这允许分配进行完成重组。
+     * {@link RebalanceProtocol#COOPERATIVE} 这个协议需要消费者在再平衡事件前保持其所有的分区，分区分配器（assignor）
+     * 不会对任何有所属消费者的分区进行重分配，但是这表明消费者需要撤销一些分区以便于在下次的再平衡事件发生时对这些撤销的分区进行重分配。这种协议
+     * 试图通过合作调整进行最小化分区分配（新的消费者加入）。
      */
     enum RebalanceProtocol {
         EAGER((byte) 0), COOPERATIVE((byte) 1);

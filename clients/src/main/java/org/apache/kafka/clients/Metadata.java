@@ -157,6 +157,7 @@ public class Metadata implements Closeable {
 
     public synchronized int requestUpdateForNewTopics() {
         // Override the timestamp of last refresh to let immediate update.
+        // lastRefreshMs = 0 直接覆盖上次刷新的时间，让元数据立即更新
         this.lastRefreshMs = 0;
         this.needPartialUpdate = true;
         this.requestVersion++;

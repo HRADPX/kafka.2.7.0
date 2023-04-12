@@ -16,17 +16,17 @@
  */
 package org.apache.kafka.clients.consumer;
 
-import org.apache.kafka.clients.consumer.internals.AbstractPartitionAssignor;
-import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.utils.CircularIterator;
-import org.apache.kafka.common.utils.Utils;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.SortedSet;
 import java.util.TreeSet;
+
+import org.apache.kafka.clients.consumer.internals.AbstractPartitionAssignor;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.utils.CircularIterator;
+import org.apache.kafka.common.utils.Utils;
 
 /**
  * <p>The round robin assignor lays out all the available partitions and all the available consumers. It
@@ -96,9 +96,24 @@ import java.util.TreeSet;
  * <li><code>I1: [t0p1, t1p1]</code>
  * <li><code>I2: [t0p2, t1p2]</code>
  * </ul>
+ *
+ * 分区默认的分配策略，通过轮询的方式将所有的分区分配给所有的消费者实例。
+ *
+ * 为了避免多个消费者消费同一个分区带来的额外加锁和同步处理，Kafka 在消费者启动时会给消费者分配分区，
+ * 保证一个分区只会被一个消费者处理，从而提升消费者的性能。
+ *
+ * 当订阅数和消费实例数一致时，分区会被均匀分布在每个实例上。假设某个消费组有 2 个消费者 C0，C1，订阅了t0，t1 两个 topic，
+ * 每个 topic 都有 3 个分区，分区分布为 t0p0,t0p1,t0p2,t1p0,t1p1,t1p02,通过轮询分配的结果：
+ *  C0: [t0p0, t0p2, t1p1]
+ *  C1: [t0p1, t1p0, t1p2]
+ *
  */
 public class RoundRobinAssignor extends AbstractPartitionAssignor {
 
+    /**
+     * @param partitionsPerTopic 订阅 topic 和其分区数量映射
+     * @param subscriptions Map from the member id to their respective topic subscription
+     */
     @Override
     public Map<String, List<TopicPartition>> assign(Map<String, Integer> partitionsPerTopic,
                                                     Map<String, Subscription> subscriptions) {

@@ -16,6 +16,18 @@
  */
 package org.apache.kafka.clients.consumer;
 
+import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
+import static org.apache.kafka.common.config.ConfigDef.ValidString.in;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.apache.kafka.clients.ClientDnsLookup;
 import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.common.IsolationLevel;
@@ -28,18 +40,6 @@ import org.apache.kafka.common.errors.InvalidConfigurationException;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.requests.JoinGroupRequest;
 import org.apache.kafka.common.serialization.Deserializer;
-
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Properties;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
-
-import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
-import static org.apache.kafka.common.config.ConfigDef.ValidString.in;
 
 /**
  * The consumer configuration keys
@@ -105,6 +105,9 @@ public class ConsumerConfig extends AbstractConfig {
 
     /**
      * <code>partition.assignment.strategy</code>
+     * 分区分配策略，即如何将订阅的 topic 的分区分配给消费实配。
+     * @see RangeAssignor
+     * @see RoundRobinAssignor
      */
     public static final String PARTITION_ASSIGNMENT_STRATEGY_CONFIG = "partition.assignment.strategy";
     private static final String PARTITION_ASSIGNMENT_STRATEGY_DOC = "A list of class names or class types, " +

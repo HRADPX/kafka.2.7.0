@@ -16,12 +16,6 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor;
-import org.apache.kafka.common.Cluster;
-import org.apache.kafka.common.TopicPartition;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -29,6 +23,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+
+import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor;
+import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.TopicPartition;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Abstract assignor implementation which does some common grunt work (in particular collecting
@@ -43,18 +43,31 @@ public abstract class AbstractPartitionAssignor implements ConsumerPartitionAssi
      *                           from this map.
      * @param subscriptions Map from the member id to their respective topic subscription
      * @return Map from each member to the list of partitions assigned to them.
+     * 对给定的分区数和消费组进行分区分配。
+     * {@param partitionsPerTopic} topic 和其分区数量的映射
+     * {@param subscriptions} 消费者和其订阅的 topic 的映射
+     * Kafka 默认的分区器是 {@link org.apache.kafka.clients.consumer.RangeAssignor}
      */
     public abstract Map<String, List<TopicPartition>> assign(Map<String, Integer> partitionsPerTopic,
                                                              Map<String, Subscription> subscriptions);
 
+    /**
+     * 执行消费组分区分配，返回一个 Map， key 为 memberId, value 是分配的分区列表
+     * {@param metadata} topic/broker 的元数据
+     * {@param groupSubscription} 所有消费者的订阅
+     */
     @Override
     public GroupAssignment assign(Cluster metadata, GroupSubscription groupSubscription) {
+        // key: memberId
         Map<String, Subscription> subscriptions = groupSubscription.groupSubscription();
+        // 所有订阅的主题
         Set<String> allSubscribedTopics = new HashSet<>();
         for (Map.Entry<String, Subscription> subscriptionEntry : subscriptions.entrySet())
             allSubscribedTopics.addAll(subscriptionEntry.getValue().topics());
 
+        // key: topic, value: topic 的分区数
         Map<String, Integer> partitionsPerTopic = new HashMap<>();
+        // 遍历所有订阅的主题，获取每个主题的分区数量
         for (String topic : allSubscribedTopics) {
             Integer numPartitions = metadata.partitionCountForTopic(topic);
             if (numPartitions != null && numPartitions > 0)
@@ -63,9 +76,11 @@ public abstract class AbstractPartitionAssignor implements ConsumerPartitionAssi
                 log.debug("Skipping assignment for topic {} since no metadata is available", topic);
         }
 
+        // 执行分配
         Map<String, List<TopicPartition>> rawAssignments = assign(partitionsPerTopic, subscriptions);
 
         // this class maintains no user data, so just wrap the results
+        // 封装下结果
         Map<String, Assignment> assignments = new HashMap<>();
         for (Map.Entry<String, List<TopicPartition>> assignmentEntry : rawAssignments.entrySet())
             assignments.put(assignmentEntry.getKey(), new Assignment(assignmentEntry.getValue()));
@@ -84,6 +99,10 @@ public abstract class AbstractPartitionAssignor implements ConsumerPartitionAssi
         return partitions;
     }
 
+    /**
+     * 排序规则，有两个字段进行排序，分别是 group.instance.id 和 member.id
+     * 优先级： group.instance.id > member.id
+     */
     public static class MemberInfo implements Comparable<MemberInfo> {
         public final String memberId;
         public final Optional<String> groupInstanceId;

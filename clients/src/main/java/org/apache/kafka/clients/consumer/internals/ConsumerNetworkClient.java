@@ -16,6 +16,19 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
+
 import org.apache.kafka.clients.ClientRequest;
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.KafkaClient;
@@ -32,19 +45,6 @@ import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.slf4j.Logger;
-
-import java.io.Closeable;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Higher level consumer access to the network layer with basic support for request futures. This class
@@ -73,6 +73,7 @@ public class ConsumerNetworkClient implements Closeable {
     // is to avoid invoking them while holding this object's monitor which can open the door for deadlocks.
     private final ConcurrentLinkedQueue<RequestFutureCompletionHandler> pendingCompletion = new ConcurrentLinkedQueue<>();
 
+    // 存储断开连接的节点
     private final ConcurrentLinkedQueue<Node> pendingDisconnects = new ConcurrentLinkedQueue<>();
 
     // this flag allows the client to be safely woken up without waiting on the lock above. It is
@@ -120,17 +121,22 @@ public class ConsumerNetworkClient implements Closeable {
      *                         cancelling the request. The request may be cancelled sooner if the socket disconnects
      *                         for any reason.
      * @return A future which indicates the result of the send.
+     * 发送请求，实际上只是将请求存储到 UnsentRequests 这个数据结构中（Map），在后续的调用 {@link #poll(Timer)} 方法时将数据发送给服务端。
+     * @see org.apache.kafka.clients.consumer.internals.ConsumerNetworkClient#poll(Timer, PollCondition, boolean)
      */
     public RequestFuture<ClientResponse> send(Node node,
                                               AbstractRequest.Builder<?> requestBuilder,
                                               int requestTimeoutMs) {
         long now = time.milliseconds();
+        // 回调，服务端收到请求将响应返回后，会调用 request 的回调的 onComplete 方法
         RequestFutureCompletionHandler completionHandler = new RequestFutureCompletionHandler();
         ClientRequest clientRequest = client.newClientRequest(node.idString(), requestBuilder, now, true,
                 requestTimeoutMs, completionHandler);
+        // 将请求放到 unsent 这个数据结构中
         unsent.put(node, clientRequest);
 
         // wakeup the client in case it is blocking in poll so that we can send the queued request
+        // 唤醒，执行 poll 方法
         client.wakeup();
         return completionHandler.future;
     }
@@ -159,6 +165,7 @@ public class ConsumerNetworkClient implements Closeable {
      * @return true if update succeeded, false otherwise.
      */
     public boolean awaitMetadataUpdate(Timer timer) {
+        // needFullUpdate = true
         int version = this.metadata.requestUpdate();
         do {
             poll(timer);
@@ -169,6 +176,7 @@ public class ConsumerNetworkClient implements Closeable {
     /**
      * Ensure our metadata is fresh (if an update is expected, this will block
      * until it has completed).
+     * 更新元数据
      */
     boolean ensureFreshMetadata(Timer timer) {
         if (this.metadata.updateRequested() || this.metadata.timeToNextUpdate(timer.currentTimeMs()) == 0) {
@@ -244,6 +252,7 @@ public class ConsumerNetworkClient implements Closeable {
      */
     public void poll(Timer timer, PollCondition pollCondition, boolean disableWakeup) {
         // there may be handlers which need to be invoked if we woke up the previous call to poll
+        // 处理上一次成功的请求（该方式可能是在循环体里）
         firePendingCompletedRequests();
 
         lock.lock();
@@ -252,11 +261,13 @@ public class ConsumerNetworkClient implements Closeable {
             handlePendingDisconnects();
 
             // send all the requests we can send now
+            // Send 存储到 KafkaClient
             long pollDelayMs = trySend(timer.currentTimeMs());
 
             // check whether the poll is still needed by the caller. Note that if the expected completion
             // condition becomes satisfied after the call to shouldBlock() (because of a fired completion
             // handler), the client will be woken up.
+            // 执行网络 I/O
             if (pendingCompletion.isEmpty() && (pollCondition == null || pollCondition.shouldBlock())) {
                 // if there are no requests in flight, do not block longer than the retry backoff
                 long pollTimeout = Math.min(timer.remainingMs(), pollDelayMs);
@@ -447,7 +458,9 @@ public class ConsumerNetworkClient implements Closeable {
                 if (node == null)
                     break;
 
+                // 执行这个节点请求的失败回调，因为这个节点要断连了，请求不会被发送了
                 failUnsentRequests(node, DisconnectException.INSTANCE);
+                // 执行断连
                 client.disconnect(node.idString());
             }
         } finally {
@@ -488,6 +501,7 @@ public class ConsumerNetworkClient implements Closeable {
         long pollDelayMs = maxPollTimeoutMs;
 
         // send any requests that can be sent now
+        // 从 unsent 里获取要发送的请求
         for (Node node : unsent.nodes()) {
             Iterator<ClientRequest> iterator = unsent.requestIterator(node);
             if (iterator.hasNext())
@@ -495,6 +509,7 @@ public class ConsumerNetworkClient implements Closeable {
 
             while (iterator.hasNext()) {
                 ClientRequest request = iterator.next();
+                // 同客户端
                 if (client.ready(node, now)) {
                     client.send(request, now);
                     iterator.remove();
@@ -599,6 +614,7 @@ public class ConsumerNetworkClient implements Closeable {
             } else if (response.versionMismatch() != null) {
                 future.raise(response.versionMismatch());
             } else {
+                // 成功
                 future.complete(response);
             }
         }
@@ -611,6 +627,8 @@ public class ConsumerNetworkClient implements Closeable {
         @Override
         public void onComplete(ClientResponse response) {
             this.response = response;
+            // 将当前 Handler 添加到 pendingCompletion 队列中，表示响应处理成功
+            // 再后续的流程中，会从这个队列中取出这个 Handler，
             pendingCompletion.add(this);
         }
     }

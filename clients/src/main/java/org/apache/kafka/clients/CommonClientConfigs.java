@@ -16,14 +16,14 @@
  */
 package org.apache.kafka.clients;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * Configurations shared by Kafka client applications: producer, consumer, connect, etc.
@@ -146,6 +146,7 @@ public class CommonClientConfigs {
                                                           + "flush any pending data and commit offsets. If the timeout is exceeded, then the worker will be removed "
                                                           + "from the group, which will cause offset commit failures.";
 
+    // 消费组（客户端）向服务端发送心跳的最大时间间隔
     public static final String SESSION_TIMEOUT_MS_CONFIG = "session.timeout.ms";
     public static final String SESSION_TIMEOUT_MS_DOC = "The timeout used to detect client failures when using "
                                                         + "Kafka's group management facility. The client sends periodic heartbeats to indicate its liveness "

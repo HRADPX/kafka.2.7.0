@@ -16,6 +16,31 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import static java.util.Collections.emptyList;
+
+import java.io.Closeable;
+import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.PriorityQueue;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
 import org.apache.kafka.clients.ApiVersion;
 import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.ClientResponse;
@@ -84,31 +109,6 @@ import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
 import org.slf4j.helpers.MessageFormatter;
 
-import java.io.Closeable;
-import java.nio.ByteBuffer;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.PriorityQueue;
-import java.util.Queue;
-import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
-import java.util.stream.Collectors;
-
-import static java.util.Collections.emptyList;
-
 /**
  * This class manages the fetching process with the brokers.
  * <p>
@@ -129,6 +129,8 @@ import static java.util.Collections.emptyList;
  *     updated while processing responses on one thread are visible while creating the subsequent request
  *     on a different thread.</li>
  * </ul>
+ *
+ * 这个类管理从 brokers 拉取数据的过程
  */
 public class Fetcher<K, V> implements Closeable {
     private final Logger log;
@@ -147,6 +149,7 @@ public class Fetcher<K, V> implements Closeable {
     private final ConsumerMetadata metadata;
     private final FetchManagerMetrics sensors;
     private final SubscriptionState subscriptions;
+    // 保存从服务端拉取到的数据
     private final ConcurrentLinkedQueue<CompletedFetch> completedFetches;
     private final BufferSupplier decompressionBufferSupplier = BufferSupplier.create();
     private final Deserializer<K> keyDeserializer;
@@ -156,6 +159,7 @@ public class Fetcher<K, V> implements Closeable {
     private final AtomicReference<RuntimeException> cachedListOffsetsException = new AtomicReference<>();
     private final AtomicReference<RuntimeException> cachedOffsetForLeaderException = new AtomicReference<>();
     private final OffsetsForLeaderEpochClient offsetsForLeaderEpochClient;
+    // 保存正在处理的节点id
     private final Set<Integer> nodesWithPendingFetchRequests;
     private final ApiVersions apiVersions;
     private final AtomicInteger metadataUpdateVersion = new AtomicInteger(-1);
@@ -250,6 +254,8 @@ public class Fetcher<K, V> implements Closeable {
         // Update metrics in case there was an assignment change
         sensors.maybeUpdateAssignment(subscriptions);
 
+        // 构造拉数据请求
+        // key: 拉数据的节点，value: 拉数据的请求（这里面其实是一个列表）
         Map<Node, FetchSessionHandler.FetchRequestData> fetchRequestMap = prepareFetchRequests();
         for (Map.Entry<Node, FetchSessionHandler.FetchRequestData> entry : fetchRequestMap.entrySet()) {
             final Node fetchTarget = entry.getKey();
@@ -265,6 +271,7 @@ public class Fetcher<K, V> implements Closeable {
             if (log.isDebugEnabled()) {
                 log.debug("Sending {} {} to broker {}", isolationLevel, data.toString(), fetchTarget);
             }
+            // 发送请求
             RequestFuture<ClientResponse> future = client.send(fetchTarget, request);
             // We add the node to the set of nodes with pending fetch requests before adding the
             // listener because the future may have been fulfilled on another thread (e.g. during a
@@ -318,6 +325,7 @@ public class Fetcher<K, V> implements Closeable {
                                     Iterator<? extends RecordBatch> batches = partitionData.records().batches().iterator();
                                     short responseVersion = resp.requestHeader().apiVersion();
 
+                                    // 保存拉取的数据到 completedFetches 中
                                     completedFetches.add(new CompletedFetch(partition, partitionData,
                                             metricAggregator, batches, fetchOffset, responseVersion));
                                 }
@@ -325,6 +333,7 @@ public class Fetcher<K, V> implements Closeable {
 
                             sensors.fetchLatency.record(resp.requestLatencyMs());
                         } finally {
+                            // 处理完成，移除当前正在处理的节点
                             nodesWithPendingFetchRequests.remove(fetchTarget.id());
                         }
                     }
@@ -601,11 +610,14 @@ public class Fetcher<K, V> implements Closeable {
     public Map<TopicPartition, List<ConsumerRecord<K, V>>> fetchedRecords() {
         Map<TopicPartition, List<ConsumerRecord<K, V>>> fetched = new HashMap<>();
         Queue<CompletedFetch> pausedCompletedFetches = new ArrayDeque<>();
+        // 最大拉取的记录数
         int recordsRemaining = maxPollRecords;
 
         try {
             while (recordsRemaining > 0) {
+                // 首次拉取 nextInLineFetch = null
                 if (nextInLineFetch == null || nextInLineFetch.isConsumed) {
+                    // 首次拉取，就在这里返回了，因为消费者什么都没做...
                     CompletedFetch records = completedFetches.peek();
                     if (records == null) break;
 
@@ -1136,8 +1148,10 @@ public class Fetcher<K, V> implements Closeable {
      */
     private void validatePositionsOnMetadataChange() {
         int newMetadataUpdateVersion = metadata.updateVersion();
+        // metadataUpdateVersion 初始值为 -1
         if (metadataUpdateVersion.getAndSet(newMetadataUpdateVersion) != newMetadataUpdateVersion) {
             subscriptions.assignedPartitions().forEach(topicPartition -> {
+                // 获取当前分区的 leader 节点
                 ConsumerMetadata.LeaderAndEpoch leaderAndEpoch = metadata.currentLeader(topicPartition);
                 subscriptions.maybeValidatePositionForCurrentLeader(apiVersions, topicPartition, leaderAndEpoch);
             });
@@ -1155,7 +1169,10 @@ public class Fetcher<K, V> implements Closeable {
 
         long currentTimeMs = time.milliseconds();
 
+        // todo huangran 确认这个里的分区是什么时候加入的
+        // 所有的分区
         for (TopicPartition partition : fetchablePartitions()) {
+            // 上次消费的 position
             FetchPosition position = this.subscriptions.position(partition);
             if (position == null) {
                 throw new IllegalStateException("Missing position for fetchable partition " + partition);
@@ -1169,7 +1186,9 @@ public class Fetcher<K, V> implements Closeable {
             }
 
             // Use the preferred read replica if set, otherwise the position's leader
+            // 选择数据读取的节点
             Node node = selectReadReplica(partition, leaderOpt.get(), currentTimeMs);
+            // 节点不可用
             if (client.isUnavailable(node)) {
                 client.maybeThrowAuthFailure(node);
 
@@ -1177,9 +1196,11 @@ public class Fetcher<K, V> implements Closeable {
                 // going to be failed anyway before being sent, so skip the send for now
                 log.trace("Skipping fetch for partition {} because node {} is awaiting reconnect backoff", partition, node);
             } else if (this.nodesWithPendingFetchRequests.contains(node.id())) {
+                // nodesWithPendingFetchRequests 这个队列保存了没有上次还没有处理的节点id
                 log.trace("Skipping fetch for partition {} because previous request to {} has not been processed", partition, node);
             } else {
                 // if there is a leader and no in-flight requests, issue a new fetch
+                // 这里还是将发向同一个节点的请求放在一起
                 FetchSessionHandler.Builder builder = fetchable.get(node);
                 if (builder == null) {
                     int id = node.id();
@@ -1192,6 +1213,7 @@ public class Fetcher<K, V> implements Closeable {
                     fetchable.put(node, builder);
                 }
 
+                // 封装分区请求
                 builder.add(partition, new FetchRequest.PartitionData(position.offset,
                     FetchRequest.INVALID_LOG_START_OFFSET, this.fetchSize,
                     position.currentLeader.epoch, Optional.empty()));
@@ -1434,6 +1456,7 @@ public class Fetcher<K, V> implements Closeable {
                 currentTopicPartitions.add(tp);
             }
         }
+        // currentTopicPartitions：assignedTopics 和 subscriptions.assignedPartitions() 的交集
         clearBufferedDataForUnassignedPartitions(currentTopicPartitions);
     }
 
