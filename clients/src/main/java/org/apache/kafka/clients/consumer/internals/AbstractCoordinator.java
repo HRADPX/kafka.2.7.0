@@ -16,68 +16,31 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import java.io.Closeable;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.GroupRebalanceConfig;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
-import org.apache.kafka.common.errors.AuthenticationException;
-import org.apache.kafka.common.errors.DisconnectException;
-import org.apache.kafka.common.errors.FencedInstanceIdException;
-import org.apache.kafka.common.errors.GroupAuthorizationException;
-import org.apache.kafka.common.errors.GroupMaxSizeReachedException;
-import org.apache.kafka.common.errors.IllegalGenerationException;
-import org.apache.kafka.common.errors.InterruptException;
-import org.apache.kafka.common.errors.MemberIdRequiredException;
-import org.apache.kafka.common.errors.RebalanceInProgressException;
-import org.apache.kafka.common.errors.RetriableException;
-import org.apache.kafka.common.errors.UnknownMemberIdException;
-import org.apache.kafka.common.message.FindCoordinatorRequestData;
-import org.apache.kafka.common.message.HeartbeatRequestData;
-import org.apache.kafka.common.message.JoinGroupRequestData;
-import org.apache.kafka.common.message.JoinGroupResponseData;
+import org.apache.kafka.common.errors.*;
+import org.apache.kafka.common.message.*;
 import org.apache.kafka.common.message.LeaveGroupRequestData.MemberIdentity;
 import org.apache.kafka.common.message.LeaveGroupResponseData.MemberResponse;
-import org.apache.kafka.common.message.SyncGroupRequestData;
 import org.apache.kafka.common.metrics.Measurable;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
-import org.apache.kafka.common.metrics.stats.Avg;
-import org.apache.kafka.common.metrics.stats.CumulativeCount;
-import org.apache.kafka.common.metrics.stats.CumulativeSum;
-import org.apache.kafka.common.metrics.stats.Max;
-import org.apache.kafka.common.metrics.stats.Meter;
-import org.apache.kafka.common.metrics.stats.Rate;
-import org.apache.kafka.common.metrics.stats.WindowedCount;
+import org.apache.kafka.common.metrics.stats.*;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.requests.FindCoordinatorRequest;
+import org.apache.kafka.common.requests.*;
 import org.apache.kafka.common.requests.FindCoordinatorRequest.CoordinatorType;
-import org.apache.kafka.common.requests.FindCoordinatorResponse;
-import org.apache.kafka.common.requests.HeartbeatRequest;
-import org.apache.kafka.common.requests.HeartbeatResponse;
-import org.apache.kafka.common.requests.JoinGroupRequest;
-import org.apache.kafka.common.requests.JoinGroupResponse;
-import org.apache.kafka.common.requests.LeaveGroupRequest;
-import org.apache.kafka.common.requests.LeaveGroupResponse;
-import org.apache.kafka.common.requests.OffsetCommitRequest;
-import org.apache.kafka.common.requests.SyncGroupRequest;
-import org.apache.kafka.common.requests.SyncGroupResponse;
-import org.apache.kafka.common.utils.KafkaThread;
-import org.apache.kafka.common.utils.LogContext;
-import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
-import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.utils.*;
 import org.slf4j.Logger;
+
+import java.io.Closeable;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * AbstractCoordinator implements group management for a single group member by interacting with
@@ -284,7 +247,7 @@ public abstract class AbstractCoordinator implements Closeable {
         if (findCoordinatorFuture == null) {
             // find a node to ask about the coordinator
             // 从 broker 集群中找一个最新的节点（完成请求最少），它偏向选择已经建立连接的节点，但是如果所有连接的节点都是 busy 状态，
-            // 它也会选择一个没有完成建立连接的节点
+            // 它也会选择一个没有完成建立连接的节点，找这个节点的目的是为了发送请求
             Node node = this.client.leastLoadedNode();
             if (node == null) {
                 log.debug("No broker available to send FindCoordinator request");
@@ -586,7 +549,8 @@ public abstract class AbstractCoordinator implements Closeable {
 
         // send a join group request to the coordinator
         log.info("(Re-)joining group");
-        // 构建请求
+        // 构建请求，ApiKeys = JOIN_GROUP
+        // KafkaApis 处理逻辑，对于 leader 消费者是先到先得
         JoinGroupRequest.Builder requestBuilder = new JoinGroupRequest.Builder(
                 new JoinGroupRequestData()
                         .setGroupId(rebalanceConfig.groupId)
@@ -652,7 +616,7 @@ public abstract class AbstractCoordinator implements Closeable {
 
                             log.info("Successfully joined group with generation {}", AbstractCoordinator.this.generation);
 
-                            // todo huangran 服务端 leader 是如何确定的
+                            // 消费组里的 leader 是先到先得，该消费组第一个注册的消费者就是 leader
                             if (joinResponse.isLeader()) {
                                 onJoinLeader(joinResponse).chain(future);
                             } else {
@@ -757,6 +721,7 @@ public abstract class AbstractCoordinator implements Closeable {
             }
 
             // 将分配的结果封装到同步请求中，发送给服务端，这样服务端就可以知道每个消费者分配到的所有分区
+            // ApiKeys = SYNC_GROUP
             SyncGroupRequest.Builder requestBuilder =
                     new SyncGroupRequest.Builder(
                             new SyncGroupRequestData()
@@ -884,7 +849,12 @@ public abstract class AbstractCoordinator implements Closeable {
     private RequestFuture<Void> sendFindCoordinatorRequest(Node node) {
         // initiate the group metadata request
         log.debug("Sending FindCoordinator request to broker {}", node);
-        // 封装请求
+        /*
+         * 封装请求，ApiKeys = FIND_COORDINATOR
+         * 在 KafkaApis 中的处理逻辑是: 先对 groupId 进行 hashCode，并对该消费组订阅的 topic 的 partition 数量进行取模
+         * (Utils.abs(groupId.hashCode) % groupMetadataTopicPartitionCount) 得到 partitionIndex，然后找到这个分区
+         * 号的 leader 分区在哪台服务节点上，就用该节点作为协调节点
+         */
         FindCoordinatorRequest.Builder requestBuilder =
                 new FindCoordinatorRequest.Builder(
                         new FindCoordinatorRequestData()
@@ -919,9 +889,9 @@ public abstract class AbstractCoordinator implements Closeable {
                     //  3）ConsumerNetworkClient.poll 循环执行，firePendingCompletedRequests -> completionHandler.fireCompletion()
                     // 创建协调器对象
                     AbstractCoordinator.this.coordinator = new Node(
-                            coordinatorConnectionId,
-                            findCoordinatorResponse.data().host(),
-                            findCoordinatorResponse.data().port());
+                            coordinatorConnectionId,                    // 找到作为协调器的服务节点
+                            findCoordinatorResponse.data().host(),      // host
+                            findCoordinatorResponse.data().port());     // port
                     log.info("Discovered group coordinator {}", coordinator);
                     // 尝试为协调器创建网络连接
                     client.tryConnect(coordinator);

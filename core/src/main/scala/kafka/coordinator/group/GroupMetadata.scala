@@ -200,6 +200,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   private[group] val lock = new ReentrantLock
 
+  // 创建的时 state = Empty
   private var state: GroupState = initialState
   var currentStateTimestamp: Option[Long] = Some(time.milliseconds())
   var protocolType: Option[String] = None
@@ -247,10 +248,13 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     assert(this.protocolType.orNull == member.protocolType)
     assert(supportsProtocols(member.protocolType, MemberMetadata.plainProtocolSet(member.supportedProtocols)))
 
+    // 首次加入，leaderId 是空的，所以 leader 是先到先得
     if (leaderId.isEmpty)
       leaderId = Some(member.memberId)
+    // 加到 members 中
     members.put(member.memberId, member)
     member.supportedProtocols.foreach{ case (protocol, _) => supportedProtocols(protocol) += 1 }
+    // 将回调函数保存到 Member 中，实际后续在 maybePrepareRebalance 方法中创建的 DelayJoin 中被调用的
     member.awaitingJoinCallback = callback
     if (member.isAwaitingJoin)
       numMembersAwaitingJoin += 1

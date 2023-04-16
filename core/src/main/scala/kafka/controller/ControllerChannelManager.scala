@@ -86,6 +86,10 @@ class ControllerChannelManager(controllerContext: ControllerContext,
       val stateInfoOpt = brokerStateInfo.get(brokerId)
       stateInfoOpt match {
         case Some(stateInfo) =>
+          // 这里直接的请求保存到了 messageQueue 队列中，后续会有一个线程专门从这个队列中取数据进行处理
+          // 这里需要注意的是 stateInfoOpt 是 [ControllerBrokerStateInfo]，它内部存在一个线程 RequestSendThread
+          // 该线程和 ControllerBrokerStateInfo 一样都持有 messageQueue 的引用，这里添加后 RequestSendThread
+          // 也可以直接获取，请求的发送处理在 RequestSendThread 的 doWork() 方法中
           stateInfo.messageQueue.put(QueueItem(request.apiKey, request, callback, time.milliseconds()))
         case None =>
           warn(s"Not sending request $request to broker $brokerId, since it is offline.")
@@ -234,6 +238,7 @@ class RequestSendThread(val controllerId: Int,
 
     def backoff(): Unit = pause(100, TimeUnit.MILLISECONDS)
 
+    // 从队列中取出请求
     val QueueItem(apiKey, requestBuilder, callback, enqueueTimeMs) = queue.take()
     requestRateAndQueueTimeMetrics.update(time.milliseconds() - enqueueTimeMs, TimeUnit.MILLISECONDS)
 
@@ -251,7 +256,7 @@ class RequestSendThread(val controllerId: Int,
           else {
             val clientRequest = networkClient.newClientRequest(brokerNode.idString, requestBuilder,
               time.milliseconds(), true)
-            // 发送请求，处理逻辑在 KafkaApis
+            // 发送请求，实际处理逻辑在 KafkaApis
             clientResponse = NetworkClientUtils.sendAndReceive(networkClient, clientRequest, time)
             isSendSuccessful = true
           }
@@ -542,7 +547,7 @@ abstract class AbstractControllerBrokerRequestBatch(config: KafkaConfig,
       // ApiKeys.UPDATE_METADATA
       val updateMetadataRequestBuilder = new UpdateMetadataRequest.Builder(updateMetadataRequestVersion,
         controllerId, controllerEpoch, brokerEpoch, partitionStates.asJava, liveBrokers.asJava)
-      // 发送更新元数据请求
+      // 发送更新元数据请求，实现类 ControllerBrokerRequestBatch
       sendRequest(broker, updateMetadataRequestBuilder, (r: AbstractResponse) => {
         val updateMetadataResponse = r.asInstanceOf[UpdateMetadataResponse]
         sendEvent(UpdateMetadataResponseReceived(updateMetadataResponse, broker))

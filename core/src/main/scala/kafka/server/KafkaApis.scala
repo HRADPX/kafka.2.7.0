@@ -142,14 +142,19 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
         case ApiKeys.LEADER_AND_ISR => handleLeaderAndIsrRequest(request)
         case ApiKeys.STOP_REPLICA => handleStopReplicaRequest(request)
+        // 更新元数据请求
         case ApiKeys.UPDATE_METADATA => handleUpdateMetadataRequest(request)
         case ApiKeys.CONTROLLED_SHUTDOWN => handleControlledShutdownRequest(request)
         case ApiKeys.OFFSET_COMMIT => handleOffsetCommitRequest(request)
         case ApiKeys.OFFSET_FETCH => handleOffsetFetchRequest(request)
+        // 消费组寻找 coordinator 的请求
         case ApiKeys.FIND_COORDINATOR => handleFindCoordinatorRequest(request)
+        // 消费加入消费组
         case ApiKeys.JOIN_GROUP => handleJoinGroupRequest(request)
+        // 心跳
         case ApiKeys.HEARTBEAT => handleHeartbeatRequest(request)
         case ApiKeys.LEAVE_GROUP => handleLeaveGroupRequest(request)
+        // 同步消费组
         case ApiKeys.SYNC_GROUP => handleSyncGroupRequest(request)
         case ApiKeys.DESCRIBE_GROUPS => handleDescribeGroupRequest(request)
         case ApiKeys.LIST_GROUPS => handleListGroupsRequest(request)
@@ -308,6 +313,7 @@ class KafkaApis(val requestChannel: RequestChannel,
 
   def handleUpdateMetadataRequest(request: RequestChannel.Request): Unit = {
     val correlationId = request.header.correlationId
+    // 获取请求
     val updateMetadataRequest = request.body[UpdateMetadataRequest]
 
     authorizeClusterOperation(request, CLUSTER_ACTION)
@@ -319,6 +325,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       sendResponseExemptThrottle(request,
         new UpdateMetadataResponse(new UpdateMetadataResponseData().setErrorCode(Errors.STALE_BROKER_EPOCH.code)))
     } else {
+      // 处理元数据更新请求逻辑
       val deletedPartitions = replicaManager.maybeUpdateMetadataCache(correlationId, updateMetadataRequest)
       if (deletedPartitions.nonEmpty)
         groupCoordinator.handleDeletedPartitions(deletedPartitions)
@@ -342,6 +349,7 @@ class KafkaApis(val requestChannel: RequestChannel,
           replicaManager.tryCompleteElection(TopicPartitionOperationKey(tp))
         }
       }
+      // 返回响应
       sendResponseExemptThrottle(request, new UpdateMetadataResponse(
         new UpdateMetadataResponseData().setErrorCode(Errors.NONE.code)))
     }
@@ -1175,7 +1183,9 @@ class KafkaApis(val requestChannel: RequestChannel,
   }
 
   private def getOrCreateInternalTopic(topic: String, listenerName: ListenerName): MetadataResponseData.MetadataResponseTopic = {
+    // 获取 topic 元数据
     val topicMetadata = metadataCache.getTopicMetadata(Set(topic), listenerName)
+    // topic 不存在则创建
     topicMetadata.headOption.getOrElse(createInternalTopic(topic))
   }
 
@@ -1375,6 +1385,7 @@ class KafkaApis(val requestChannel: RequestChannel,
   }
 
   def handleFindCoordinatorRequest(request: RequestChannel.Request): Unit = {
+    // 获取请求
     val findCoordinatorRequest = request.body[FindCoordinatorRequest]
 
     if (findCoordinatorRequest.data.keyType == CoordinatorType.GROUP.id &&
@@ -1386,8 +1397,12 @@ class KafkaApis(val requestChannel: RequestChannel,
     else {
       // get metadata (and create the topic if necessary)
       val (partition, topicMetadata) = CoordinatorType.forId(findCoordinatorRequest.data.keyType) match {
+          // find coordinator 的 type 是 GROUP
         case CoordinatorType.GROUP =>
+          // data.key = groupId
+          // partition 是 groupId 的 hashCode 对 topic 的分区数量取模
           val partition = groupCoordinator.partitionFor(findCoordinatorRequest.data.key)
+          // 获取 topic 元数据，如果 topic 不存在则创建
           val metadata = getOrCreateInternalTopic(GROUP_METADATA_TOPIC_NAME, request.context.listenerName)
           (partition, metadata)
 
@@ -1414,6 +1429,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         val responseBody = if (topicMetadata.errorCode != Errors.NONE.code) {
           createFindCoordinatorResponse(Errors.COORDINATOR_NOT_AVAILABLE, Node.noNode)
         } else {
+          // 找到分区号(partitionIndex)为 partition 的主节点作为协调节点
           val coordinatorEndpoint = topicMetadata.partitions.asScala
             .find(_.partitionIndex == partition)
             .filter(_.leaderId != MetadataResponse.NO_LEADER_ID)
@@ -1432,6 +1448,7 @@ class KafkaApis(val requestChannel: RequestChannel,
           .format(responseBody, request.header.correlationId, request.header.clientId))
         responseBody
       }
+      // 返回响应
       sendResponseMaybeThrottle(request, createResponse)
     }
   }
@@ -1566,6 +1583,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       val protocols = joinGroupRequest.data.protocols.valuesList.asScala.map(protocol =>
         (protocol.name, protocol.metadata)).toList
 
+      // 实际处理逻辑
       groupCoordinator.handleJoinGroup(
         joinGroupRequest.data.groupId,
         joinGroupRequest.data.memberId,

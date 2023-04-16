@@ -91,10 +91,11 @@ class KafkaZkClient private[zk] (zooKeeperClient: ZooKeeperClient, isSecure: Boo
     * @return broker epoch (znode create transaction id)
     */
   def registerBroker(brokerInfo: BrokerInfo): Long = {
-    // broker path  --> /brokers/ids/0
+    // 构建一个 zk 目录，一个 broker 会生成一个目录
+    // broker path  --> /brokers/ids/{$id}
     val path = brokerInfo.path
     // brokerInfo.toJsonBytes: 封装 broker 的信息（如 host、port、version 等）
-    // 在 zk 上创建临时目录并写入信息
+    // 在 zk 上创建临时目录并写入 broker 的信息
     val stat = checkedEphemeralCreate(path, brokerInfo.toJsonBytes)
     info(s"Registered broker ${brokerInfo.broker.id} at path $path with addresses: " +
       s"${brokerInfo.broker.endPoints.map(_.connectionString).mkString(",")}, czxid (broker epoch): ${stat.getCzxid}")

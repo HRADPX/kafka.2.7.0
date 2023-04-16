@@ -382,9 +382,10 @@ object TopicCommand extends Logging {
     override def createTopic(topic: CommandTopicPartition): Unit = {
       val adminZkClient = new AdminZkClient(zkClient)
       try {
-        if (topic.hasReplicaAssignment)
+        if (topic.hasReplicaAssignment) {
+          // 创建 topic
           adminZkClient.createTopicWithAssignment(topic.name, topic.configsToAdd, topic.replicaAssignment.get)
-        else
+        } else
           adminZkClient.createTopic(topic.name, topic.partitions.get, topic.replicationFactor.get, topic.configsToAdd, topic.rackAwareMode)
         println(s"Created topic ${topic.name}.")
       } catch  {
