@@ -1539,6 +1539,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     val joinGroupRequest = request.body[JoinGroupRequest]
 
     // the callback for sending a join-group response
+    // 执行完成的回调，用于发送响应给客户端
     def sendResponseCallback(joinResult: JoinGroupResult): Unit = {
       def createResponse(requestThrottleMs: Int): AbstractResponse = {
         val protocolName = if (request.context.apiVersion() >= 7)
@@ -1565,6 +1566,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       sendResponseMaybeThrottle(request, createResponse)
     }
 
+    // 版本兼容逻辑
     if (joinGroupRequest.data.groupInstanceId != null && config.interBrokerProtocolVersion < KAFKA_2_3_IV0) {
       // Only enable static membership when IBP >= 2.3, because it is not safe for the broker to use the static member logic
       // until we are sure that all brokers support it. If static group being loaded by an older coordinator, it will discard
@@ -1595,7 +1597,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         joinGroupRequest.data.sessionTimeoutMs,
         joinGroupRequest.data.protocolType,
         protocols,
-        sendResponseCallback)
+        sendResponseCallback) // 回调函数
     }
   }
 

@@ -105,6 +105,7 @@ abstract class DelayedOperation(override val delayMs: Long,
    * Thread-safe variant of tryComplete() and call extra function if first tryComplete returns false
    * @param f else function to be executed after first tryComplete returns false
    * @return result of tryComplete
+   * 判断是否完成，如果没有执行 f 后最后再 check 一次
    */
   private[server] def safeTryCompleteOrElse(f: => Unit): Boolean = inLock(lock) {
     if (tryComplete()) true

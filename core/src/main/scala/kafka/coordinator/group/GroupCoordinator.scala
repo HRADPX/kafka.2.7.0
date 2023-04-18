@@ -141,6 +141,8 @@ class GroupCoordinator(val brokerId: Int,
       //    if the max group size was reduced.
       // 2) using the number of awaiting members allows to kick out the last rejoining
       //    members of the group.
+      // 如果一个消费者已经存在，并且在等待中，这个加入的请求需要被处理（不会占用数量）
+      // 新的消费者需要看当前正在等待加入的消费者是否已经达到了能最大容忍等待数量
       case PreparingRebalance =>
         (group.has(member) && group.get(member).isAwaitingJoin) ||
           group.numAwaiting < groupConfig.groupMaxSize
@@ -164,6 +166,7 @@ class GroupCoordinator(val brokerId: Int,
                       protocolType: String,
                       protocols: List[(String, Array[Byte])],
                       responseCallback: JoinCallback): Unit = {
+    // 执行校验规则，如 groupId 是否为空，当前节点是否是协调节点，如果没有通过，则通过回调函数返回对应失败的响应
     validateGroupStatus(groupId, ApiKeys.JOIN_GROUP).foreach { error =>
       responseCallback(JoinGroupResult(memberId, error))
       return
@@ -177,7 +180,7 @@ class GroupCoordinator(val brokerId: Int,
       val isUnknownMember = memberId == JoinGroupRequest.UNKNOWN_MEMBER_ID
       // group is created if it does not exist and the member id is UNKNOWN. if member
       // is specified but group does not exist, request is rejected with UNKNOWN_MEMBER_ID
-      // 如果 group 不存在，则为当前的 groupId 创建一个 GroupMetadata
+      // 如果 group 不存在，则为当前的 groupId 创建一个 GroupMetadata, state = Empty
       groupManager.getOrMaybeCreateGroup(groupId, isUnknownMember) match {
         case None =>
           responseCallback(JoinGroupResult(memberId, Errors.UNKNOWN_MEMBER_ID))
@@ -189,6 +192,7 @@ class GroupCoordinator(val brokerId: Int,
               group.removeStaticMember(groupInstanceId)
               responseCallback(JoinGroupResult(JoinGroupRequest.UNKNOWN_MEMBER_ID, Errors.GROUP_MAX_SIZE_REACHED))
             } else if (isUnknownMember) {
+              // 新消费者首次加入
               doUnknownJoinGroup(group, groupInstanceId, requireKnownMemberId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs, protocolType, protocols, responseCallback)
             } else {
               doJoinGroup(group, memberId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs, protocolType, protocols, responseCallback)
@@ -223,7 +227,7 @@ class GroupCoordinator(val brokerId: Int,
       } else if (!group.supportsProtocols(protocolType, MemberMetadata.plainProtocolSet(protocols))) {
         responseCallback(JoinGroupResult(JoinGroupRequest.UNKNOWN_MEMBER_ID, Errors.INCONSISTENT_GROUP_PROTOCOL))
       } else {
-        // 生成一个新的 memberId
+        // 生成一个新的 memberId（clientId-uuid）
         val newMemberId = group.generateMemberId(clientId, groupInstanceId)
 
         // 这个表示定义了 group.instance.id
@@ -1149,7 +1153,7 @@ class GroupCoordinator(val brokerId: Int,
     if (group.is(CompletingRebalance))
       resetAndPropagateAssignmentError(group, Errors.REBALANCE_IN_PROGRESS)
 
-    // 初始状态
+    // 初始状态是 Empty
     val delayedRebalance = if (group.is(Empty))
       new InitialDelayedJoin(this,
         joinPurgatory,

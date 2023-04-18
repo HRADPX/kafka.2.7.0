@@ -248,7 +248,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     assert(this.protocolType.orNull == member.protocolType)
     assert(supportsProtocols(member.protocolType, MemberMetadata.plainProtocolSet(member.supportedProtocols)))
 
-    // 首次加入，leaderId 是空的，所以 leader 是先到先得
+    // 首次加入，leaderId 是空的，所以消费组的 leader 是先到先得
     if (leaderId.isEmpty)
       leaderId = Some(member.memberId)
     // 加到 members 中
