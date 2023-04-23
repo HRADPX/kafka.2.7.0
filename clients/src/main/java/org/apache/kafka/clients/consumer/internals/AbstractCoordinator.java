@@ -517,7 +517,9 @@ public abstract class AbstractCoordinator implements Closeable {
                     log.info("Rebalance failed.", exception);
                 }
 
+                // reset joinFuture = null
                 resetJoinGroupFuture();
+                // 如果是这些异常不需要重置 state
                 if (exception instanceof UnknownMemberIdException ||
                     exception instanceof RebalanceInProgressException ||
                     exception instanceof IllegalGenerationException ||
@@ -597,7 +599,7 @@ public abstract class AbstractCoordinator implements Closeable {
                         .setGroupInstanceId(this.rebalanceConfig.groupInstanceId.orElse(null))
                         .setProtocolType(protocolType())
                         .setProtocols(metadata())
-                        .setRebalanceTimeoutMs(this.rebalanceConfig.rebalanceTimeoutMs)
+                        .setRebalanceTimeoutMs(this.rebalanceConfig.rebalanceTimeoutMs) // 300s
         );
 
         log.debug("Sending JoinGroup ({}) to coordinator {}", requestBuilder, this.coordinator);
@@ -656,6 +658,7 @@ public abstract class AbstractCoordinator implements Closeable {
 
                             // 消费组里的 leader 是先到先得，该消费组第一个注册的消费者就是 leader
                             if (joinResponse.isLeader()) {
+                                // 执行分区分配，分配的结果同步给服务端
                                 onJoinLeader(joinResponse).chain(future);
                             } else {
                                 onJoinFollower().chain(future);

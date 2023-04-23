@@ -16,11 +16,11 @@
  */
 package org.apache.kafka.clients;
 
-import org.apache.kafka.common.config.AbstractConfig;
-import org.apache.kafka.common.requests.JoinGroupRequest;
-
 import java.util.Locale;
 import java.util.Optional;
+
+import org.apache.kafka.common.config.AbstractConfig;
+import org.apache.kafka.common.requests.JoinGroupRequest;
 
 /**
  * Class to extract group rebalance related configs.
@@ -46,12 +46,15 @@ public class GroupRebalanceConfig {
     public final boolean leaveGroupOnClose;
 
     public GroupRebalanceConfig(AbstractConfig config, ProtocolType protocolType) {
+        // 默认值 10s
         this.sessionTimeoutMs = config.getInt(CommonClientConfigs.SESSION_TIMEOUT_MS_CONFIG);
 
         // Consumer and Connect use different config names for defining rebalance timeout
         if (protocolType == ProtocolType.CONSUMER) {
+            // 默认为 300s
             this.rebalanceTimeoutMs = config.getInt(CommonClientConfigs.MAX_POLL_INTERVAL_MS_CONFIG);
         } else {
+            // 默认为 60s
             this.rebalanceTimeoutMs = config.getInt(CommonClientConfigs.REBALANCE_TIMEOUT_MS_CONFIG);
         }
 

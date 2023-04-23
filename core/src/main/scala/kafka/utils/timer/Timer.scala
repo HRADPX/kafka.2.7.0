@@ -61,8 +61,11 @@ class SystemTimer(executorName: String,
   private[this] val taskExecutor = Executors.newFixedThreadPool(1,
     (runnable: Runnable) => KafkaThread.nonDaemon("executor-" + executorName, runnable))
 
+  // 延迟任务队列
   private[this] val delayQueue = new DelayQueue[TimerTaskList]()
+  // 任务计数器
   private[this] val taskCounter = new AtomicInteger(0)
+  // 记时轮
   private[this] val timingWheel = new TimingWheel(
     tickMs = tickMs,
     wheelSize = wheelSize,
@@ -79,6 +82,7 @@ class SystemTimer(executorName: String,
   def add(timerTask: TimerTask): Unit = {
     readLock.lock()
     try {
+      // timerTask.delayMs + Time.SYSTEM.hiResClockMs: dead line time
       addTimerTaskEntry(new TimerTaskEntry(timerTask, timerTask.delayMs + Time.SYSTEM.hiResClockMs))
     } finally {
       readLock.unlock()
@@ -88,6 +92,7 @@ class SystemTimer(executorName: String,
   private def addTimerTaskEntry(timerTaskEntry: TimerTaskEntry): Unit = {
     if (!timingWheel.add(timerTaskEntry)) {
       // Already expired or cancelled
+      // 执行到了过期时间立刻执行该任务
       if (!timerTaskEntry.cancelled)
         taskExecutor.submit(timerTaskEntry.timerTask)
     }
@@ -106,6 +111,7 @@ class SystemTimer(executorName: String,
       try {
         while (bucket != null) {
           timingWheel.advanceClock(bucket.getExpiration)
+          // 执行 reinsert，这里本质上还是调用 insert 逻辑，如果发现延迟操作已经超时，会被立刻强制执行
           bucket.flush(reinsert)
           bucket = delayQueue.poll()
         }

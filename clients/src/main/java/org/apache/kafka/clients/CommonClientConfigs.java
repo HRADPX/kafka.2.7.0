@@ -131,6 +131,8 @@ public class CommonClientConfigs {
                                                        + "This can be used in combination with a larger session timeout to avoid group rebalances caused by transient unavailability "
                                                        + "(e.g. process restarts). If not set, the consumer will join the group as a dynamic member, which is the traditional behavior.";
 
+    // 默认值是 300s。当使用消费组管理时两次调用 poll 方法的最大间隔，这个参数设置了消费者消费消息的最大空闲时间。
+    // 如果消费者在超时之前没有调用 poll 方法，该消费者会被认为下线会触发消费组 re-balance
     public static final String MAX_POLL_INTERVAL_MS_CONFIG = "max.poll.interval.ms";
     public static final String MAX_POLL_INTERVAL_MS_DOC = "The maximum delay between invocations of poll() when using "
                                                           + "consumer group management. This places an upper bound on the amount of time that the consumer can be idle "
@@ -140,13 +142,14 @@ public class CommonClientConfigs {
                                                           + "Instead, the consumer will stop sending heartbeats and partitions will be reassigned "
                                                           + "after expiration of <code>session.timeout.ms</code>. This mirrors the behavior of a static consumer which has shutdown.";
 
+    // 默认值 60s。
     public static final String REBALANCE_TIMEOUT_MS_CONFIG = "rebalance.timeout.ms";
     public static final String REBALANCE_TIMEOUT_MS_DOC = "The maximum allowed time for each worker to join the group "
                                                           + "once a rebalance has begun. This is basically a limit on the amount of time needed for all tasks to "
                                                           + "flush any pending data and commit offsets. If the timeout is exceeded, then the worker will be removed "
                                                           + "from the group, which will cause offset commit failures.";
 
-    // 消费组（客户端）向服务端发送心跳的最大时间间隔
+    // 默认值 10s。消费组（客户端）向服务端发送心跳的最大时间间隔
     public static final String SESSION_TIMEOUT_MS_CONFIG = "session.timeout.ms";
     public static final String SESSION_TIMEOUT_MS_DOC = "The timeout used to detect client failures when using "
                                                         + "Kafka's group management facility. The client sends periodic heartbeats to indicate its liveness "

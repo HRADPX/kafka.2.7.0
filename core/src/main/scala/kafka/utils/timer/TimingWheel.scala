@@ -55,9 +55,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * then the buckets at different levels are:
  *
  * level    buckets
- * 1        [c,c]   [c+1,c+1]  [c+2,c+2]
- * 2        [c,c+2] [c+3,c+5]  [c+6,c+8]
- * 3        [c,c+8] [c+9,c+17] [c+18,c+26]
+ * 1        [c,c]   [c+1,c+1]  [c+2,c+2]      unit = 1
+ * 2        [c,c+2] [c+3,c+5]  [c+6,c+8]      unit = 3 * 1 = 3
+ * 3        [c,c+8] [c+9,c+17] [c+18,c+26]    unit = 3 * 3 = 9
  *
  * The bucket expiration is at the time of bucket beginning.
  * So at time = c+1, buckets [c,c], [c,c+2] and [c,c+8] are expired.
@@ -95,13 +95,20 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * This class is not thread-safe. There should not be any add calls while advanceClock is executing.
  * It is caller's responsibility to enforce it. Simultaneous add calls are thread-safe.
+ *
+ *
+ * 1. 时间轮中过期的任务会被立即执行。
+ * 2. 在分层的时间轮中，如果当前层的时间单位是 u，那么下层的时间单位是 n * u (n 为 buckets 的数量)
  */
 @nonthreadsafe
 private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, taskCounter: AtomicInteger, queue: DelayQueue[TimerTaskList]) {
 
+  // init tickMs = 1, wheelSize = 20
+  // init interval = 20ms
   private[this] val interval = tickMs * wheelSize
   private[this] val buckets = Array.tabulate[TimerTaskList](wheelSize) { _ => new TimerTaskList(taskCounter) }
 
+  // 四舍五入到 tickMs 的倍数
   private[this] var currentTime = startMs - (startMs % tickMs) // rounding down to multiple of tickMs
 
   // overflowWheel can potentially be updated and read by two concurrent threads through add().
@@ -123,17 +130,22 @@ private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, ta
   }
 
   def add(timerTaskEntry: TimerTaskEntry): Boolean = {
+    // 任务过期时间戳
     val expiration = timerTaskEntry.expirationMs
 
+    // 任务被取消
     if (timerTaskEntry.cancelled) {
       // Cancelled
       false
     } else if (expiration < currentTime + tickMs) {
       // Already expired
+      // 到过期时间
       false
     } else if (expiration < currentTime + interval) {
       // Put in its own bucket
+      // 过期时间在当前层
       val virtualId = expiration / tickMs
+      // 对应的桶的位置
       val bucket = buckets((virtualId % wheelSize.toLong).toInt)
       bucket.add(timerTaskEntry)
 
@@ -149,7 +161,9 @@ private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, ta
       true
     } else {
       // Out of the interval. Put it into the parent timer
+      // 过期时间在不在当前层，放到下一层，下一层的 interval 是当前层 interval * wheelSize
       if (overflowWheel == null) addOverflowWheel()
+      // 进下一层
       overflowWheel.add(timerTaskEntry)
     }
   }

@@ -1025,6 +1025,7 @@ class GroupCoordinator(val brokerId: Int,
       clientId, clientHost, rebalanceTimeoutMs,
       sessionTimeoutMs, protocolType, protocols)
 
+    // 标识是个新的消费者
     member.isNew = true
 
     // update the newMemberAdded flag to indicate that the join group can be further delayed
@@ -1049,7 +1050,7 @@ class GroupCoordinator(val brokerId: Int,
     } else {
       group.removePendingMember(memberId)
     }
-    // rebalance ?
+    // rebalance
     maybePrepareRebalance(group, s"Adding new member $memberId with group instance id $groupInstanceId")
   }
 
@@ -1153,26 +1154,41 @@ class GroupCoordinator(val brokerId: Int,
     if (group.is(CompletingRebalance))
       resetAndPropagateAssignmentError(group, Errors.REBALANCE_IN_PROGRESS)
 
-    // 初始状态是 Empty
+    /**
+     * 初始状态是 Empty.
+     * 这里需要注意的是，首个消费者加入消费组后，并没有直接执行 JOIN GROUP 的回调返回给消费者客户端，而是在加入消费组后将回调函数保存到
+     * MemberMetadata.awaitingJoinCallback 属性中。
+     * 在第一个消费者加入消费组时，这里会创建一个 InitialDelayedJoin 延迟操作，默认超时时间是 3s，当达到超时时间后，延迟操作会被强制完成执行。
+     * 具体的执行流程：
+     * 这个延迟操作会被放到时间轮（timeWheel）中的延迟队列中，在 DelayedOperationPurgatory 中会有一个后台线程 ExpiredOperationReaper，
+     * 会不断从 timeWheel 的队列中轮询要超时的延迟操作，如果没有则等待一段时间，如果有超时的操作，会从队列中取出，然后执行 reinsert 事件，这
+     * 本质上还是调用 insert 的逻辑，在 insert 逻辑中如果发现这个操作已经过期，会拒绝入队，并会有一个线程池（taskExecutor）来立刻强制执行
+     * 这个延迟操作，即 InitialDelayedJoin 中的 run 方法。调用链 InitialDelayedJoin#run() -> forceComplete() -> onComplete()
+     *
+     * 在 InitialDelayedJoin 中的 onComplete() 的方法中， group.newMemberAdded = false，所以实际是调用父类的方法。在父类方法中，调用
+     * 协调器的 onCompleteJoin() 方法，在该方法中将 leader 消费者的响应返回给客户端。
+     * [[DelayedOperationPurgatory.expirationReaper]] 后台线程轮询超时任务线程
+     * [[DelayedOperation.onComplete()]]
+     * [[GroupCoordinator.onCompleteJoin()]]
+     */
     val delayedRebalance = if (group.is(Empty))
       new InitialDelayedJoin(this,
         joinPurgatory,
         group,
-        groupConfig.groupInitialRebalanceDelayMs,
-        groupConfig.groupInitialRebalanceDelayMs,
+        groupConfig.groupInitialRebalanceDelayMs,   // 3s
+        groupConfig.groupInitialRebalanceDelayMs,   // 3s
         max(group.rebalanceTimeoutMs - groupConfig.groupInitialRebalanceDelayMs, 0))
     else
-      new DelayedJoin(this, group, group.rebalanceTimeoutMs)
+      new DelayedJoin(this, group, group.rebalanceTimeoutMs)  // 300s
 
-    // 设置 state = PreparingRebalance，准备开始 rebalance
+    // 设置 state = PreparingRebalance，准备开始 rebalance，即等待所有的消费者发送 JOIN GROUP 请求
     group.transitionTo(PreparingRebalance)
 
     info(s"Preparing to rebalance group ${group.groupId} in state ${group.currentState} with old generation " +
       s"${group.generationId} (${Topic.GROUP_METADATA_TOPIC_NAME}-${partitionFor(group.groupId)}) (reason: $reason)")
 
     val groupKey = GroupKey(group.groupId)
-    // 首次是不会完成的，因为这是 leader 消费者，这里应该是需要将分区的分区的信息给同步过来，所以会被放到一个 watch 队列中
-    // todo huangran watch 逻辑
+    // 首次是不会完成的，所以会被放到一个 watch 队列中
     joinPurgatory.tryCompleteElseWatch(delayedRebalance, Seq(groupKey))
   }
 
@@ -1237,6 +1253,7 @@ class GroupCoordinator(val brokerId: Int,
           new DelayedJoin(this, group, group.rebalanceTimeoutMs),
           Seq(GroupKey(group.groupId)))
       } else {
+        // 生成 generationId、设置消费组状态为 CompletingRebalance，等待其他消费者加入或重新加入消费组执行 re-balance
         group.initNextGeneration()
         if (group.is(Empty)) {
           info(s"Group ${group.groupId} with generation ${group.generationId} is now empty " +
@@ -1255,6 +1272,7 @@ class GroupCoordinator(val brokerId: Int,
             s"(${Topic.GROUP_METADATA_TOPIC_NAME}-${partitionFor(group.groupId)})")
 
           // trigger the awaiting join group response callback for all the members after rebalancing
+          // 执行回调函数返回 JOIN GROUP 的结果返回给消费者客户端
           for (member <- group.allMemberMetadata) {
             val joinResult = JoinGroupResult(
               members = if (group.isLeader(member.memberId)) {
@@ -1269,6 +1287,7 @@ class GroupCoordinator(val brokerId: Int,
               leaderId = group.leaderOrNull,
               error = Errors.NONE)
 
+            // 执行回调
             group.maybeInvokeJoinCallback(member, joinResult)
             completeAndScheduleNextHeartbeatExpiration(group, member)
             member.isNew = false

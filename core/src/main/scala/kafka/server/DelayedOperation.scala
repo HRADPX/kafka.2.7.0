@@ -233,6 +233,7 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
     // any exclusive lock. Since DelayedOperationPurgatory.checkAndComplete() completes delayed operations asynchronously,
     // holding a exclusive lock to make the call is often unnecessary.
     if (operation.safeTryCompleteOrElse {
+      // 存储到 watcher 队列中
       watchKeys.foreach(key => watchForOperation(key, operation))
       if (watchKeys.nonEmpty) estimatedTotalOperations.incrementAndGet()
     }) return true
@@ -240,6 +241,8 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
     // if it cannot be completed by now and hence is watched, add to the expire queue also
     if (!operation.isCompleted) {
       if (timerEnabled)
+        // SystemTimer
+        // 存储到时间轮（timingWheel），当到达过期时候后，会强制执行延迟操作的 onComplete() 方法
         timeoutTimer.add(operation)
       if (operation.isCompleted) {
         // cancel the timer task

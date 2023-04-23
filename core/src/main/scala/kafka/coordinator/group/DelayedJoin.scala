@@ -54,6 +54,8 @@ private[group] class DelayedJoin(coordinator: GroupCoordinator,
   * When onComplete is triggered we check if any new members have been added and if there is still time remaining
   * before the rebalance timeout. If both are true we then schedule a further delay. Otherwise we complete the
   * rebalance.
+ * 当消费组的状态从 Empty --> PreparingRebalance 时添加到时间轮中的延迟操作。
+ * 一般请求下是第一个消费者首次加入消费组时延迟操作。
   */
 private[group] class InitialDelayedJoin(coordinator: GroupCoordinator,
                                         purgatory: DelayedOperationPurgatory[DelayedJoin],
@@ -62,10 +64,13 @@ private[group] class InitialDelayedJoin(coordinator: GroupCoordinator,
                                         delayMs: Int,
                                         remainingMs: Int) extends DelayedJoin(coordinator, group, delayMs) {
 
+  // InitialDelayedJoin 表示是第一个消费刚加入消费组，此时 tryComplete 需要返回 false，因为需要等待其他消费者都发送 JOIN GROUP
+  // 来加入到消费组，完成服务端的 re-balance
   override def tryComplete(): Boolean = false
 
   override def onComplete(): Unit = {
     group.inLock {
+      // group.newMemberAdded = false，这个 if 条件不满足
       if (group.newMemberAdded && remainingMs != 0) {
         group.newMemberAdded = false
         val delay = min(configuredRebalanceDelay, remainingMs)
