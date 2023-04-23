@@ -1029,8 +1029,13 @@ class GroupCoordinator(val brokerId: Int,
     member.isNew = true
 
     // update the newMemberAdded flag to indicate that the join group can be further delayed
-    if (group.is(PreparingRebalance) && group.generationId == 0)
+    // 这个条件成立表示陆续有新的消费者加入消费组，表示 Join Group 的延迟操作可以进一步延迟等待更多的消费者加入
+    // Note: 此时 leader 消费者的响应还没有返回给消费者客户端，因为 leader 消费者的 Join Group 请求返回时
+    // 会更新 group 的状态和 generationId.
+    if (group.is(PreparingRebalance) && group.generationId == 0) {
+      // 这里修改的状态主要是影响 InitalDelayJoin 的 onComplete 方法里的操作
       group.newMemberAdded = true
+    }
 
     // 添加逻辑
     group.add(member, callback)
@@ -1041,7 +1046,7 @@ class GroupCoordinator(val brokerId: Int,
     // timeout during a long rebalance), they may simply retry which will lead to a lot of defunct
     // members in the rebalance. To prevent this going on indefinitely, we timeout JoinGroup requests
     // for new members. If the new member is still there, we expect it to retry.
-    // 心跳 todo huangran ignore it now
+    // 心跳
     completeAndScheduleNextExpiration(group, member, NewMemberJoinTimeoutMs)
 
     if (member.isStaticMember) {
