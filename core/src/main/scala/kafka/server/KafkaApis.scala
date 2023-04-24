@@ -1593,8 +1593,8 @@ class KafkaApis(val requestChannel: RequestChannel,
         requireKnownMemberId,
         request.header.clientId,
         request.context.clientAddress.toString,
-        joinGroupRequest.data.rebalanceTimeoutMs,
-        joinGroupRequest.data.sessionTimeoutMs,
+        joinGroupRequest.data.rebalanceTimeoutMs, // 300s
+        joinGroupRequest.data.sessionTimeoutMs, // 10s
         joinGroupRequest.data.protocolType,
         protocols,
         sendResponseCallback) // 回调函数

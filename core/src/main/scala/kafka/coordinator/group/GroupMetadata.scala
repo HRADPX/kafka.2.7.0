@@ -526,7 +526,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     */
   def maybeInvokeSyncCallback(member: MemberMetadata,
                               syncGroupResult: SyncGroupResult): Boolean = {
-    // 在消费者发送 SYNC 的请求后，会将回调函数保存到 awaitingSyncCallback 中
+    // 在消费者发送 SYNC GROUP 的请求后，会将回调函数保存到 awaitingSyncCallback 中
     if (member.isAwaitingSync) {
       member.awaitingSyncCallback(syncGroupResult)
       member.awaitingSyncCallback = null

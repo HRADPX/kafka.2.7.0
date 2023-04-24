@@ -466,8 +466,11 @@ class GroupCoordinator(val brokerId: Int,
 
           case Stable =>
             // if the group is stable, we just return the current assignment
+            // 如果某个 follower 消费者发送 SYNC GROUP 请求迟了，leader 消费者已经将消费组的状态变更为 Stable，这里也没有关系，因为
+            // 所有这个节点的分区的分区已经在 leader 消费者的 SYNC GROUP 请求设置了，这里直接使用回调函数返回，并重置下心跳
             val memberMetadata = group.get(memberId)
             responseCallback(SyncGroupResult(group.protocolType, group.protocolName, memberMetadata.assignment, Errors.NONE))
+            // 重置心跳
             completeAndScheduleNextHeartbeatExpiration(group, group.get(memberId))
 
           case Dead =>
@@ -666,19 +669,24 @@ class GroupCoordinator(val brokerId: Int,
             case Empty =>
               responseCallback(Errors.UNKNOWN_MEMBER_ID)
 
+            // 消费者在收到 JOIN GROUP 响应后开始发送心跳，如果消费组此时的状态是 CompletingRebalance，表示消费组正在进行 re-balance，
+            // 此时需要将心跳请求正常处理即可
             case CompletingRebalance =>
               // consumers may start sending heartbeat after join-group response, in which case
               // we should treat them as normal hb request and reset the timer
               val member = group.get(memberId)
-              // 处理逻辑
+              // 处理逻辑，重置下心跳
               completeAndScheduleNextHeartbeatExpiration(group, member)
+              // 返回响应
               responseCallback(Errors.NONE)
 
+            // 正在准备 re-balance
             case PreparingRebalance =>
                 val member = group.get(memberId)
                 completeAndScheduleNextHeartbeatExpiration(group, member)
                 responseCallback(Errors.REBALANCE_IN_PROGRESS)
 
+            // 消费组状态变为 Stable，re-balance 完成，正常处理心跳请求，重新心跳
             case Stable =>
                 val member = group.get(memberId)
                 completeAndScheduleNextHeartbeatExpiration(group, member)
@@ -972,7 +980,7 @@ class GroupCoordinator(val brokerId: Int,
       }
 
       // return false, follower 消费者还没有发送 SYNC GROUP 请求来服务端....
-      // todo huangran 对于没有发送的应该如何处理
+      // 对于发送 SYNC GROUP 请求迟了的 follower 消费者，会在上层发现消费组的状态已经变为 Stable，会直接调用回调函数并重置心跳
       if (group.maybeInvokeSyncCallback(member, SyncGroupResult(protocolType, protocolName, member.assignment, error))) {
         // reset the session timeout for members after propagating the member's assignment.
         // This is because if any member's session expired while we were still awaiting either
