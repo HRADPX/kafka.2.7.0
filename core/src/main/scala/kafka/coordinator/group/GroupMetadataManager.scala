@@ -187,6 +187,7 @@ class GroupMetadataManager(brokerId: Int,
 
   def isPartitionLoading(partition: Int) = inLock(partitionLock) { loadingPartitions.contains(partition) }
 
+  // groupId 的 hash 对 GROUP_METADATA_TOPIC_NAME topic 的分区数量取模
   def partitionFor(groupId: String): Int = Utils.abs(groupId.hashCode) % groupMetadataTopicPartitionCount
 
   def isGroupLocal(groupId: String): Boolean = isPartitionOwned(partitionFor(groupId))
@@ -243,6 +244,7 @@ class GroupMetadataManager(brokerId: Int,
   def storeGroup(group: GroupMetadata,
                  groupAssignment: Map[String, Array[Byte]],
                  responseCallback: Errors => Unit): Unit = {
+    // 获取协调节点版本
     getMagic(partitionFor(group.groupId)) match {
       case Some(magicValue) =>
         // We always use CREATE_TIME, like the producer. The conversion to LOG_APPEND_TIME (if necessary) happens automatically.
@@ -259,6 +261,7 @@ class GroupMetadataManager(brokerId: Int,
           builder.build()
         }
 
+        // 将消费者的分区信息写到 Kafka 内部的 topic（__consumer_offsets） 中
         val groupMetadataPartition = new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, partitionFor(group.groupId))
         val groupMetadataRecords = Map(groupMetadataPartition -> records)
         val generationId = group.generationId

@@ -1604,6 +1604,7 @@ class KafkaApis(val requestChannel: RequestChannel,
   def handleSyncGroupRequest(request: RequestChannel.Request): Unit = {
     val syncGroupRequest = request.body[SyncGroupRequest]
 
+    // 回调
     def sendResponseCallback(syncGroupResult: SyncGroupResult): Unit = {
       sendResponseMaybeThrottle(request, requestThrottleMs =>
         new SyncGroupResponse(
@@ -1627,16 +1628,18 @@ class KafkaApis(val requestChannel: RequestChannel,
     } else if (!authorize(request.context, READ, GROUP, syncGroupRequest.data.groupId)) {
       sendResponseCallback(SyncGroupResult(Errors.GROUP_AUTHORIZATION_FAILED))
     } else {
+      // 每个消费者对应的分区列表
       val assignmentMap = immutable.Map.newBuilder[String, Array[Byte]]
       syncGroupRequest.data.assignments.forEach { assignment =>
         assignmentMap += (assignment.memberId -> assignment.assignment)
       }
 
+      // 处理同步逻辑
       groupCoordinator.handleSyncGroup(
         syncGroupRequest.data.groupId,
         syncGroupRequest.data.generationId,
         syncGroupRequest.data.memberId,
-        Option(syncGroupRequest.data.protocolType),
+        Option(syncGroupRequest.data.protocolType), // consumer
         Option(syncGroupRequest.data.protocolName),
         Option(syncGroupRequest.data.groupInstanceId),
         assignmentMap.result(),

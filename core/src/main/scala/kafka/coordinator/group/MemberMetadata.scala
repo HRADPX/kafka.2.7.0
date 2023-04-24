@@ -75,6 +75,7 @@ private[group] class MemberMetadata(var memberId: String,
   // this value to `false`. Upon receiving the heartbeat (or any other event
   // indicating the liveness of the client), we set it to `true` so that the
   // delayed heartbeat can be completed.
+  // 延迟心跳的标记
   var heartbeatSatisfied: Boolean = false
 
   def isAwaitingJoin = awaitingJoinCallback != null

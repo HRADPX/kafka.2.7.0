@@ -254,7 +254,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     // 加到 members 中
     members.put(member.memberId, member)
     member.supportedProtocols.foreach{ case (protocol, _) => supportedProtocols(protocol) += 1 }
-    // 将回调函数保存到 Member 中，实际后续在 maybePrepareRebalance 方法中创建的 InitDelayJoin 中被调用的
+    // 将回调函数保存到 Member 中，实际后续在 maybePrepareRebalance 方法中创建的 InitialDelayedJoin 中被调用的
     member.awaitingJoinCallback = callback
     if (member.isAwaitingJoin)
       numMembersAwaitingJoin += 1
@@ -526,6 +526,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     */
   def maybeInvokeSyncCallback(member: MemberMetadata,
                               syncGroupResult: SyncGroupResult): Boolean = {
+    // 在消费者发送 SYNC 的请求后，会将回调函数保存到 awaitingSyncCallback 中
     if (member.isAwaitingSync) {
       member.awaitingSyncCallback(syncGroupResult)
       member.awaitingSyncCallback = null

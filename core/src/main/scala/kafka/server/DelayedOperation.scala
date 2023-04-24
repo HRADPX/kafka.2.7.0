@@ -232,6 +232,7 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
     // To avoid the above scenario, we recommend DelayedOperationPurgatory.checkAndComplete() be called without holding
     // any exclusive lock. Since DelayedOperationPurgatory.checkAndComplete() completes delayed operations asynchronously,
     // holding a exclusive lock to make the call is often unnecessary.
+    // 先 tryComplete 一下，如果失败，则执行入 watch 队列
     if (operation.safeTryCompleteOrElse {
       // 存储到 watcher 队列中
       watchKeys.foreach(key => watchForOperation(key, operation))

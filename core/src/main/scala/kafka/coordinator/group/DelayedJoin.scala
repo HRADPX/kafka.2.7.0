@@ -70,8 +70,10 @@ private[group] class InitialDelayedJoin(coordinator: GroupCoordinator,
 
   override def onComplete(): Unit = {
     group.inLock {
-      // group.newMemberAdded = false，这个 if 条件不满足
+      // 默认 group.newMemberAdded = false，这个 if 条件不满足，但是如果在 InitialDelayedJoin 等待这段时间内有新的消费者加入了消费
+      // 组，这个属性会被重置为 true，就会再等一会，目的是让更多的消费者加入，所以这里往时间轮里重新加入了一个 InitialDelayedJoin
       if (group.newMemberAdded && remainingMs != 0) {
+        // 每次等待超时后强制执行完成方法都会将这个属性恢复到默认，避免已经没有新的消费者加入了，还在这里无限的等待直到 remainingMs <= 0
         group.newMemberAdded = false
         val delay = min(configuredRebalanceDelay, remainingMs)
         val remaining = max(remainingMs - delayMs, 0)
@@ -83,6 +85,7 @@ private[group] class InitialDelayedJoin(coordinator: GroupCoordinator,
           remaining
         ), Seq(GroupKey(group.groupId)))
       } else
+        // 等待已经没有新的消费者加入消费者组
         super.onComplete()
     }
   }
