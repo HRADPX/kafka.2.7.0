@@ -16,68 +16,31 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import java.io.Closeable;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.GroupRebalanceConfig;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
-import org.apache.kafka.common.errors.AuthenticationException;
-import org.apache.kafka.common.errors.DisconnectException;
-import org.apache.kafka.common.errors.FencedInstanceIdException;
-import org.apache.kafka.common.errors.GroupAuthorizationException;
-import org.apache.kafka.common.errors.GroupMaxSizeReachedException;
-import org.apache.kafka.common.errors.IllegalGenerationException;
-import org.apache.kafka.common.errors.InterruptException;
-import org.apache.kafka.common.errors.MemberIdRequiredException;
-import org.apache.kafka.common.errors.RebalanceInProgressException;
-import org.apache.kafka.common.errors.RetriableException;
-import org.apache.kafka.common.errors.UnknownMemberIdException;
-import org.apache.kafka.common.message.FindCoordinatorRequestData;
-import org.apache.kafka.common.message.HeartbeatRequestData;
-import org.apache.kafka.common.message.JoinGroupRequestData;
-import org.apache.kafka.common.message.JoinGroupResponseData;
+import org.apache.kafka.common.errors.*;
+import org.apache.kafka.common.message.*;
 import org.apache.kafka.common.message.LeaveGroupRequestData.MemberIdentity;
 import org.apache.kafka.common.message.LeaveGroupResponseData.MemberResponse;
-import org.apache.kafka.common.message.SyncGroupRequestData;
 import org.apache.kafka.common.metrics.Measurable;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
-import org.apache.kafka.common.metrics.stats.Avg;
-import org.apache.kafka.common.metrics.stats.CumulativeCount;
-import org.apache.kafka.common.metrics.stats.CumulativeSum;
-import org.apache.kafka.common.metrics.stats.Max;
-import org.apache.kafka.common.metrics.stats.Meter;
-import org.apache.kafka.common.metrics.stats.Rate;
-import org.apache.kafka.common.metrics.stats.WindowedCount;
+import org.apache.kafka.common.metrics.stats.*;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.requests.FindCoordinatorRequest;
+import org.apache.kafka.common.requests.*;
 import org.apache.kafka.common.requests.FindCoordinatorRequest.CoordinatorType;
-import org.apache.kafka.common.requests.FindCoordinatorResponse;
-import org.apache.kafka.common.requests.HeartbeatRequest;
-import org.apache.kafka.common.requests.HeartbeatResponse;
-import org.apache.kafka.common.requests.JoinGroupRequest;
-import org.apache.kafka.common.requests.JoinGroupResponse;
-import org.apache.kafka.common.requests.LeaveGroupRequest;
-import org.apache.kafka.common.requests.LeaveGroupResponse;
-import org.apache.kafka.common.requests.OffsetCommitRequest;
-import org.apache.kafka.common.requests.SyncGroupRequest;
-import org.apache.kafka.common.requests.SyncGroupResponse;
-import org.apache.kafka.common.utils.KafkaThread;
-import org.apache.kafka.common.utils.LogContext;
-import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
-import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.utils.*;
 import org.slf4j.Logger;
+
+import java.io.Closeable;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * AbstractCoordinator implements group management for a single group member by interacting with
@@ -653,6 +616,7 @@ public abstract class AbstractCoordinator implements Closeable {
                                 heartbeatThread.enable();
 
                             // 更新 generation，主要更新了 generationId 和 memberId（之前默认是 ""）
+                            // 因为主消费者可能会发生变化，所以每个消费者中都会记录 generationId，表示执行了多少次分区分配
                             AbstractCoordinator.this.generation = new Generation(
                                 joinResponse.data().generationId(),
                                 joinResponse.data().memberId(), joinResponse.data().protocolName());
@@ -663,9 +627,10 @@ public abstract class AbstractCoordinator implements Closeable {
                             if (joinResponse.isLeader()) {
                                 // 执行分区分配，分配的结果同步给服务端
                                 // 这里的 future 是加入消费组请求（JOIN_GROUP）的异步请求结果，即通过 chain 方法向 SYNC_GROUP
-                                // 的异步请求添加了一个监听器。
-                                // 注意，虽然执行到这里，但是前面说过，这里的 future 是 JOIN_GROUP 的组合模式后的异步请求结果，并且
-                                // 在这里并没有执行 future.complete 方法，所以 JOIN_GROUP 的请求是还没有完成的（future.result 仍无值）
+                                // 的异步请求结果（不是 client.send）添加了一个监听器。
+                                // 注意，虽然执行到这里，但是前面说过，这里的 future 是 JOIN_GROUP 的组合模式后的异步请求结果，
+                                // 不是 client.send() 的返回结果，并且在这里并没有执行 future.complete 方法，所以 JOIN_GROUP
+                                // 异步请求是还没有完成的（future.result 仍无值）
                                 // 这个 future 会在 SYNC_GROUP 的 listener 里调用 complete 方法完成，并将 SYNC_GROUP 请求的结果
                                 // 保存到 JOIN_GROUP 的异步请求结果中，所以虽然 JOIN_GROUP 请求比 SYNC_GROUP 早，但是实际完成却是在
                                 // SYNC_GROUP 之后，并且在 JOIN_GROUP 完成后，就可以直接在 future 里获取到结果。
@@ -760,6 +725,7 @@ public abstract class AbstractCoordinator implements Closeable {
         try {
             // perform the leader synchronization and send back the assignment for the group
             // leader 执行分区同步
+            // 这里服务端协调者将所有的消费组成员列表及其订阅的主题和分区返回给主消费者，这里是主消费者执行分区分配
             Map<String, ByteBuffer> groupAssignment = performAssignment(joinResponse.data().leader(), joinResponse.data().protocolName(),
                     joinResponse.data().members());
 
@@ -842,8 +808,8 @@ public abstract class AbstractCoordinator implements Closeable {
                                 lastRebalanceStartMs = -1L;
 
                                 // 这里的 future 是 compose() 方法返回值 = onJoinLeader().chain(future)/onJoinFollower.chain(future)
-                                // 是 SYNC_GROUP 的移步请求结果。
-                                // 这里调用 future.complete() 是会将方法的请求结果保存到 SYNC_GROUP 请求的移步请求结果中
+                                // 是 SYNC_GROUP 的异步请求（不是 client.send）结果。
+                                // 这里调用 future.complete() 是会将方法的请求结果保存到 SYNC_GROUP 请求的异步请求结果中
                                 // 同时还会调用 future 里的 listeners，在 JOIN_GROUP 的回调中，将 JOIN_GROUP 的异步请求结果作为监听器
                                 // 加入到了这个 future 中。
                                 // chain(future) 方法里参数的 future = sendJoinGroupRequest 的返回值，即 joinFuture.

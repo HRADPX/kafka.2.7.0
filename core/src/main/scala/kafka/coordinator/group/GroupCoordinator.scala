@@ -427,6 +427,8 @@ class GroupCoordinator(val brokerId: Int,
           // 在 leader 消费者的 JOIN GROUP 请求返回时，会将消费组的状态变更为 CompletingRebalance（GroupCoordinator.onCompleteJoin()）
           case CompletingRebalance =>
             // 保存回调函数，标识消费者正在同步
+            // 如果不是主消费者，仅仅保存回调，等待主消费组将分配的结果写入 Kafka 的内部主题后，协调者会调用所有消费者元数据里
+            // 的回调函数将分区分配的结果返回给消费者客户端
             group.get(memberId).awaitingSyncCallback = responseCallback
 
             // if this is the leader, then we can attempt to persist state and transition to stable
@@ -1181,6 +1183,7 @@ class GroupCoordinator(val brokerId: Int,
     group.inLock {
       // state initial is Empty
       // 在初始化阶段，只有主消费者可以满足，因为消费组的状态为 Empty
+      // 因为加入消费组的方法加了同步锁，所以不存在多个消费者并发的问题
       if (group.canRebalance)
         prepareRebalance(group, reason)
     }
@@ -1209,8 +1212,8 @@ class GroupCoordinator(val brokerId: Int,
      * 在 InitialDelayedJoin 中的 onComplete() 的方法中， 有一个判断条件，默认是 group.newMemberAdded = false，但是如果在主消费者等待的
      * 时间内有其他消费者也加入了消费组，这个属性会被重置为 true（[[GroupCoordinator.addMemberAndRebalance()]]），这表示主消费者可以再等一
      * 会让更多的消费者加入消费组，所以这该方法里会重新初始化一个新的 InitialDelayedJoin 开始新的一轮等待，同理如果有新的消费者加入同样也会执行相同
-     * 的操作，直到等待到了最大的超时时间（默认是 300s）。否则该方法实际是调用父类的方法。在父类方法中，调用协调器的 onCompleteJoin() 方法，
-     * 在该方法中将 leader 消费者的响应返回给客户端。
+     * 的操作，直到等待到了最大的超时时间（默认是 300s）。否则（在新的一轮等待中无新的消费者加入消费组）该方法实际是调用父类的方法。
+     * 在父类方法中，调用协调器的 onCompleteJoin() 方法，在该方法中将 leader 消费者的响应返回给客户端。
      * [[DelayedOperationPurgatory.expirationReaper]] 后台线程轮询超时任务线程
      * [[DelayedOperation.onComplete()]]
      * [[GroupCoordinator.onCompleteJoin()]]
@@ -1317,6 +1320,7 @@ class GroupCoordinator(val brokerId: Int,
 
           // trigger the awaiting join group response callback for all the members after rebalancing
           // 执行回调函数返回 JOIN GROUP 的结果返回给消费者客户端
+          // 这里消费组发送加入组响应是一次性发送给组里所有的消费者
           for (member <- group.allMemberMetadata) {
             val joinResult = JoinGroupResult(
               members = if (group.isLeader(member.memberId)) {

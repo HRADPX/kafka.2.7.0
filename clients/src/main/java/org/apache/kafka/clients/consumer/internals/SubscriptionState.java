@@ -16,24 +16,6 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
-import java.util.function.LongSupplier;
-import java.util.function.Predicate;
-import java.util.regex.Pattern;
-
 import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.NodeApiVersions;
@@ -47,6 +29,13 @@ import org.apache.kafka.common.internals.PartitionStates;
 import org.apache.kafka.common.requests.EpochEndOffset;
 import org.apache.kafka.common.utils.LogContext;
 import org.slf4j.Logger;
+
+import java.util.*;
+import java.util.function.LongSupplier;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
+
+import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
 
 /**
  * A class for tracking the topics, partitions, and offsets for the consumer. A partition
@@ -611,7 +600,13 @@ public class SubscriptionState {
     }
 
     /**
-     * 返回当前分区的分区偏移量
+     * 返回当前分区的分区偏移量。
+     * 分区的提交偏移量是直接使用分区的拉取偏移量。客户端在从队列中获取记录集返回给处理程序前会更新
+     * 这个分区偏移量，那么会不会在消费者还没有消费完这批消息，自动提交就将消息给提交了？
+     *  这是不会发生的，因为自动提交偏移量这个任务是在超时后会立即执行，并且发生在本次轮询中拉取器
+     *  更新最新一批记录集的拉取偏移量之前。而且这一次 Kafka 轮询中定时提交任务一定发生在上一次 Kafka
+     *  轮询都全部执行完成之后，而上一次 Kafka 轮询一定成功更新了拉取偏移量，并且也成功的处理了那批记录
+     *  集。所以本次轮询中定时提交任务需要获得的提交偏移量，实际上等价于上一次轮询更新后的拉取偏移量。
      */
     public synchronized Map<TopicPartition, OffsetAndMetadata> allConsumed() {
         Map<TopicPartition, OffsetAndMetadata> allConsumed = new HashMap<>();

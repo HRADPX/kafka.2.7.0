@@ -54,6 +54,7 @@ import scala.collection._
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
+// 消费组缓存，保存了所有消费组的元数据信息
 class GroupMetadataManager(brokerId: Int,
                            interBrokerProtocolVersion: ApiVersion,
                            config: OffsetConfig,
@@ -213,6 +214,7 @@ class GroupMetadataManager(brokerId: Int,
 
   /**
    * Get the group associated with the given groupId or null if not found
+   * 根据消费组编号获取消费组元数据对象
    */
   def getGroup(groupId: String): Option[GroupMetadata] = {
     Option(groupMetadataCache.get(groupId))
@@ -231,6 +233,7 @@ class GroupMetadataManager(brokerId: Int,
 
   /**
    * Add a group or get the group associated with the given groupId if it already exists
+   * 添加一个消费组元数据
    */
   def addGroup(group: GroupMetadata): GroupMetadata = {
     val currentGroup = groupMetadataCache.putIfNotExists(group.groupId, group)

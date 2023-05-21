@@ -193,6 +193,9 @@ case class CommitRecordMetadataAndOffset(appendedBatchOffset: Option[Long], offs
  *  1. group state
  *  2. generation id
  *  3. leader id
+ *
+ * 消费组元数据
+ * 管理了组里所有消费者的元数据
  */
 @nonthreadsafe
 private[group] class GroupMetadata(val groupId: String, initialState: GroupState, time: Time) extends Logging {
@@ -208,6 +211,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
   var generationId = 0
   private var leaderId: Option[String] = None
 
+  // 消费组里的所有消费者
   private val members = new mutable.HashMap[String, MemberMetadata]
   // Static membership mapping [key: group.instance.id, value: member.id]
   private val staticMembers = new mutable.HashMap[String, String]
@@ -267,6 +271,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
         numMembersAwaitingJoin -= 1
     }
 
+    // 如果移除的是主（leader）消费者，下一个成员将成为主消费者
     if (isLeader(memberId))
       leaderId = members.keys.headOption
   }

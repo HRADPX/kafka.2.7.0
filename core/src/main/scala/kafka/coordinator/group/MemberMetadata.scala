@@ -51,6 +51,7 @@ private object MemberMetadata {
  * 2. Awaiting sync callback: when the group is in the awaiting-sync state, its sync callback
  *                            is kept in metadata until the leader provides the group assignment
  *                            and the group transitions to stable
+ * 消费者成员元数据
  */
 @nonthreadsafe
 private[group] class MemberMetadata(var memberId: String,
@@ -63,8 +64,11 @@ private[group] class MemberMetadata(var memberId: String,
                                     val protocolType: String,
                                     var supportedProtocols: List[(String, Array[Byte])]) {
 
+  // 当前消费者分配的分区列表
   var assignment: Array[Byte] = Array.empty[Byte]
+  // 加入组的回调方法
   var awaitingJoinCallback: JoinGroupResult => Unit = null
+  // 同步组的回调方法
   var awaitingSyncCallback: SyncGroupResult => Unit = null
   var isLeaving: Boolean = false
   var isNew: Boolean = false

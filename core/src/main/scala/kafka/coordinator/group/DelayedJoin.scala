@@ -57,7 +57,7 @@ private[group] class DelayedJoin(coordinator: GroupCoordinator,
  * 当消费组的状态从 Empty --> PreparingRebalance 时添加到时间轮中的延迟操作。
  * 一般请求下是第一个消费者首次加入消费组时延迟操作。
   */
-private[group] class InitialDelayedJoin(coordinator: GroupCoordinator,
+private[group] class  InitialDelayedJoin(coordinator: GroupCoordinator,
                                         purgatory: DelayedOperationPurgatory[DelayedJoin],
                                         group: GroupMetadata,
                                         configuredRebalanceDelay: Int,

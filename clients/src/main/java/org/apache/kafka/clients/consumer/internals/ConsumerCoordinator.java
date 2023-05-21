@@ -16,48 +16,17 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
-
 import org.apache.kafka.clients.GroupRebalanceConfig;
-import org.apache.kafka.clients.consumer.CommitFailedException;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
-import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor;
+import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.Assignment;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.GroupSubscription;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.RebalanceProtocol;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.Subscription;
-import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.clients.consumer.OffsetCommitCallback;
-import org.apache.kafka.clients.consumer.RetriableCommitFailedException;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.FencedInstanceIdException;
-import org.apache.kafka.common.errors.GroupAuthorizationException;
-import org.apache.kafka.common.errors.InterruptException;
-import org.apache.kafka.common.errors.RebalanceInProgressException;
-import org.apache.kafka.common.errors.RetriableException;
-import org.apache.kafka.common.errors.TimeoutException;
-import org.apache.kafka.common.errors.TopicAuthorizationException;
-import org.apache.kafka.common.errors.UnstableOffsetCommitException;
-import org.apache.kafka.common.errors.WakeupException;
+import org.apache.kafka.common.errors.*;
 import org.apache.kafka.common.message.JoinGroupRequestData;
 import org.apache.kafka.common.message.JoinGroupResponseData;
 import org.apache.kafka.common.message.OffsetCommitRequestData;
@@ -70,16 +39,20 @@ import org.apache.kafka.common.metrics.stats.Max;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.RecordBatch;
-import org.apache.kafka.common.requests.JoinGroupRequest;
-import org.apache.kafka.common.requests.OffsetCommitRequest;
-import org.apache.kafka.common.requests.OffsetCommitResponse;
-import org.apache.kafka.common.requests.OffsetFetchRequest;
-import org.apache.kafka.common.requests.OffsetFetchResponse;
+import org.apache.kafka.common.requests.*;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
+
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 /**
  * This class manages the coordination process with the consumer coordinator.
@@ -222,6 +195,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         JoinGroupRequestData.JoinGroupRequestProtocolCollection protocolSet = new JoinGroupRequestData.JoinGroupRequestProtocolCollection();
 
         List<String> topics = new ArrayList<>(joinedSubscription);
+        // 分区分配器，默认是 RangeAssignor
         for (ConsumerPartitionAssignor assignor : assignors) {
             Subscription subscription = new Subscription(topics,
                                                          assignor.subscriptionUserData(joinedSubscription),
@@ -354,6 +328,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         log.debug("Executing onJoinComplete with generation {} and memberId {}", generation, memberId);
 
         // Only the leader is responsible for monitoring for metadata changes (i.e. partition changes)
+        // 分配分区快照，只有主消费者维护快照
         if (!isLeader)
             assignmentSnapshot = null;
 
@@ -374,6 +349,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 "it is possible that the leader's assign function is buggy and did not return any assignment for this member, " +
                 "or because static member is configured and the protocol is buggy hence did not get the assignment for this member");
 
+        // 分配结果
         Assignment assignment = ConsumerProtocol.deserializeAssignment(assignmentBuffer);
 
         Set<TopicPartition> assignedPartitions = new HashSet<>(assignment.partitions());
@@ -433,10 +409,11 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         if (autoCommitEnabled)
             this.nextAutoCommitTimer.updateAndReset(autoCommitIntervalMs);
 
-        // 保存订阅的 topic 到 assignment
+        // 保存分区到的分区到 subscriptions 中，注意如果不是再平衡，此时还没有进行分区偏移量更新
         subscriptions.assignFromSubscribed(assignedPartitions);
 
         // Add partitions that were not previously owned but are now assigned
+        // 调用分区监听器
         firstException.compareAndSet(null, invokePartitionsAssigned(addedPartitions));
 
         if (firstException.get() != null) {
@@ -711,7 +688,8 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         // 如果是自动提交，在 re-balance 前需要先执行下 commit offset
         // 这里提交 offset 是因为 rebalance 会导致分区重分配（如集群新增一个消费者需要从其他消费者的分配分区里分配一
         // 些分区给这个新的消费者，这个新消费者后续需要知道从哪个位置拉取消息会发送请求给协调者查询拉取 offset，
-        // 这就需要这些分区的前拥有者提交之前的 offset）。与定时提交 offset 不同的是，
+        // 这就需要这些分区的前拥有者提交之前的 offset）。与定时提交 offset 不同的是，这里设置的超时
+        // 时间是 300s
         maybeAutoCommitOffsetsSync(time.timer(rebalanceConfig.rebalanceTimeoutMs));
 
         // the generation / member-id can possibly be reset by the heartbeat thread
@@ -1060,6 +1038,8 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      *         the coordinator
      *
      * 同步提交 offset，这个方法会一直重试直到成功或者无法重试失败退出
+     * 同步提交的触发条件：消费者在准备或重新加入消费组之前，如果开启了自动提交，要先暂停定时任务，然后执行一次同步模式的提交
+     * 偏移量的方法，同步提交需要等到消费者将偏移量提交到服务端并且收到响应结果后才会返回。
      */
     public boolean commitOffsetsSync(Map<TopicPartition, OffsetAndMetadata> offsets, Timer timer) {
         // 执行 offset commit 之后的回调
@@ -1266,7 +1246,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                     long offset = offsetAndMetadata.offset();
 
                     Errors error = Errors.forCode(partition.errorCode());
-                    // 成功，无其他操作
+                    // 成功，无其他操作（这里为什么不更新分区状态的拉取偏移量） todo huangran
                     if (error == Errors.NONE) {
                         log.debug("Committed offset {} for partition {}", offset, tp);
                     } else {
