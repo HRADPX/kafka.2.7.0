@@ -89,9 +89,11 @@ public class SubscriptionState {
     /* The list of topics the group has subscribed to. This may include some topics which are not part
      * of `subscription` for the leader of a group since it is responsible for detecting metadata changes
      * which require a group rebalance. */
+    // 消费组订阅的主题
     private Set<String> groupSubscription;
 
     /* the partitions that are currently assigned, note that the order of partition matters (see FetchBuilder for more details) */
+    // 消费者分配的分区和状态
     private final PartitionStates<TopicPartitionState> assignment;
 
     /* Default offset reset strategy */
@@ -444,6 +446,7 @@ public class SubscriptionState {
         return this.subscriptionType == SubscriptionType.AUTO_TOPICS || this.subscriptionType == SubscriptionType.AUTO_PATTERN;
     }
 
+    // 更新拉取偏移量
     public synchronized void position(TopicPartition tp, FetchPosition position) {
         assignedState(tp).position(position);
     }
@@ -539,6 +542,7 @@ public class SubscriptionState {
         return assignedState(tp).validPosition();
     }
 
+    // 获取分区的拉取偏移量，拉取消息时使用最新的拉取位置
     public synchronized FetchPosition position(TopicPartition tp) {
         return assignedState(tp).position;
     }
@@ -606,6 +610,9 @@ public class SubscriptionState {
         return assignedState(tp).clearPreferredReadReplica();
     }
 
+    /**
+     * 返回当前分区的分区偏移量
+     */
     public synchronized Map<TopicPartition, OffsetAndMetadata> allConsumed() {
         Map<TopicPartition, OffsetAndMetadata> allConsumed = new HashMap<>();
         assignment.forEach((topicPartition, partitionState) -> {
@@ -649,6 +656,7 @@ public class SubscriptionState {
         return assignedState(partition).resetStrategy();
     }
 
+    // 判断是否所有的分区都存在有效的拉取偏移量
     public synchronized boolean hasAllFetchPositions() {
         // Since this is in the hot-path for fetching, we do this instead of using java.util.stream API
         Iterator<TopicPartitionState> it = assignment.stateIterator();
@@ -678,11 +686,12 @@ public class SubscriptionState {
     public synchronized void resetInitializingPositions() {
         final Set<TopicPartition> partitionsWithNoOffsets = new HashSet<>();
         assignment.forEach((tp, partitionState) -> {
+            // 还是处理 INITIALIZING 状态的分区
             if (partitionState.fetchState.equals(FetchStates.INITIALIZING)) {
                 if (defaultResetStrategy == OffsetResetStrategy.NONE)
                     partitionsWithNoOffsets.add(tp);
                 else
-                    requestOffsetReset(tp);
+                    requestOffsetReset(tp); // 状态转换为 AWAIT_RESET
             }
         });
 
@@ -745,6 +754,7 @@ public class SubscriptionState {
 
     private static class TopicPartitionState {
 
+        // 初始值为 INITIALIZING
         private FetchState fetchState;
         // 上次消费的 position
         private FetchPosition position; // last consumed position
@@ -752,6 +762,7 @@ public class SubscriptionState {
         private Long highWatermark; // the high watermark from last fetch
         private Long logStartOffset; // the log start offset
         private Long lastStableOffset;
+        // 分区是否被暂停拉取
         private boolean paused;  // whether this partition has been paused by the user
         private OffsetResetStrategy resetStrategy;  // the strategy to use if the offset needs resetting
         private Long nextRetryTimeMs;

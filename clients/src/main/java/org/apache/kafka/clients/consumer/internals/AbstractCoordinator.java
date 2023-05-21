@@ -240,6 +240,8 @@ public abstract class AbstractCoordinator implements Closeable {
      *
      * @param timer Timer bounding how long this method can block
      * @return true If coordinator discovery and initial connection succeeded, false otherwise
+     *
+     * 确保客户端连接上协调者对象
      */
     protected synchronized boolean ensureCoordinatorReady(final Timer timer) {
         if (!coordinatorUnknown())
@@ -486,6 +488,7 @@ public abstract class AbstractCoordinator implements Closeable {
                 // SyncGroupResponseHandler#handle 同步消费组成功后回调方法对这两个属性就行修改
                 if (!generationSnapshot.equals(Generation.NO_GENERATION) && stateSnapshot == MemberState.STABLE) {
                     // Duplicate the buffer in case `onJoinComplete` does not complete and needs to be retried.
+                    // 这里 future.value 的值就是服务端返回的当前消费组分配的分区列表
                     ByteBuffer memberAssignment = future.value().duplicate();
 
                     // todo huangran 加入消费组成功的操作
@@ -595,7 +598,7 @@ public abstract class AbstractCoordinator implements Closeable {
                 new JoinGroupRequestData()
                         .setGroupId(rebalanceConfig.groupId)
                         .setSessionTimeoutMs(this.rebalanceConfig.sessionTimeoutMs)
-                        .setMemberId(this.generation.memberId)  // 首次加入时是 ""
+                        .setMemberId(this.generation.memberId)  // 首次加入时是消费者的编号是 UNKNOWN_MEMBER_ID
                         .setGroupInstanceId(this.rebalanceConfig.groupInstanceId.orElse(null))
                         .setProtocolType(protocolType())
                         .setProtocols(metadata())
@@ -659,6 +662,13 @@ public abstract class AbstractCoordinator implements Closeable {
                             // 消费组里的 leader 是先到先得，该消费组第一个注册的消费者就是 leader
                             if (joinResponse.isLeader()) {
                                 // 执行分区分配，分配的结果同步给服务端
+                                // 这里的 future 是加入消费组请求（JOIN_GROUP）的异步请求结果，即通过 chain 方法向 SYNC_GROUP
+                                // 的异步请求添加了一个监听器。
+                                // 注意，虽然执行到这里，但是前面说过，这里的 future 是 JOIN_GROUP 的组合模式后的异步请求结果，并且
+                                // 在这里并没有执行 future.complete 方法，所以 JOIN_GROUP 的请求是还没有完成的（future.result 仍无值）
+                                // 这个 future 会在 SYNC_GROUP 的 listener 里调用 complete 方法完成，并将 SYNC_GROUP 请求的结果
+                                // 保存到 JOIN_GROUP 的异步请求结果中，所以虽然 JOIN_GROUP 请求比 SYNC_GROUP 早，但是实际完成却是在
+                                // SYNC_GROUP 之后，并且在 JOIN_GROUP 完成后，就可以直接在 future 里获取到结果。
                                 onJoinLeader(joinResponse).chain(future);
                             } else {
                                 onJoinFollower().chain(future);
@@ -831,10 +841,14 @@ public abstract class AbstractCoordinator implements Closeable {
                                 sensors.successfulRebalanceSensor.record(lastRebalanceEndMs - lastRebalanceStartMs);
                                 lastRebalanceStartMs = -1L;
 
-                                // 实际上 No Op
                                 // 这里的 future 是 compose() 方法返回值 = onJoinLeader().chain(future)/onJoinFollower.chain(future)
-                                // 而 chain(future) 方法里参数的 future = sendJoinGroupRequest 的返回值，即 joinFuture.
-                                // joinFuture 添加的 Listener 在 onSuccess 方法里是 do nothing
+                                // 是 SYNC_GROUP 的移步请求结果。
+                                // 这里调用 future.complete() 是会将方法的请求结果保存到 SYNC_GROUP 请求的移步请求结果中
+                                // 同时还会调用 future 里的 listeners，在 JOIN_GROUP 的回调中，将 JOIN_GROUP 的异步请求结果作为监听器
+                                // 加入到了这个 future 中。
+                                // chain(future) 方法里参数的 future = sendJoinGroupRequest 的返回值，即 joinFuture.
+                                // 所以这个 complete 方法里调用的监听器实际上是 joinFuture.complete() 方法，即将 SYNC_GROUP 的结果
+                                // 也保存到 JOIN_GROUP 的异步请求结果中，至此 JOIN_GROUP 里的 result 就有值，这个请求就完成了。
                                 future.complete(ByteBuffer.wrap(syncResponse.data.assignment()));
                             }
                         } else {
@@ -1174,6 +1188,7 @@ public abstract class AbstractCoordinator implements Closeable {
                         .setMemberId(this.generation.memberId)
                         .setGroupInstanceId(this.rebalanceConfig.groupInstanceId.orElse(null))
                         .setGenerationId(this.generation.generationId));
+        // 发送心跳给协调者
         return client.send(coordinator, requestBuilder)
                 .compose(new HeartbeatResponseHandler(generation)); // 回调
     }
@@ -1196,6 +1211,7 @@ public abstract class AbstractCoordinator implements Closeable {
                     || error == Errors.NOT_COORDINATOR) {
                 log.info("Attempt to heartbeat failed since coordinator {} is either not started or not valid",
                         coordinator());
+                // 协调者对象发生变化，重置协调者对象为空
                 markCoordinatorUnknown(error);
                 future.raise(error);
                 // 正在 re-balance
@@ -1204,7 +1220,8 @@ public abstract class AbstractCoordinator implements Closeable {
                 // this case and ignore the REBALANCE_IN_PROGRESS error
                 if (state == MemberState.STABLE) {
                     log.info("Attempt to heartbeat failed since group is rebalancing");
-                    requestRejoin();    // 这里为什么要 rejoin
+                    // 这里为什么要 rejoin，因为 state = STABLE，表示已经完成加入消费组了，但是服务端正在再平衡，所以需要重新加入消费组
+                    requestRejoin();
                     future.raise(error);
                 } else {
                     log.debug("Ignoring heartbeat response with error {} during {} state", error, state);

@@ -16,14 +16,14 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.utils.Timer;
-
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Result of an asynchronous request from {@link ConsumerNetworkClient}. Use {@link ConsumerNetworkClient#poll(Timer)}
@@ -197,9 +197,16 @@ public class RequestFuture<T> implements ConsumerNetworkClient.PollCondition {
      * @param adapter The adapter which does the conversion
      * @param <S> The type of the future adapted to
      * @return The new future
+     * 本质上通过添加监听器实现的，并返回一个新的异步请求。
+     * 添加的这个监听器是添加在当前异步请求中的，而不是返回的新的异步请求中。
+     * 但是这里需要注意调用该方法的对象，通常而言是 client.send 返回的 future 对象。
+     *
+     * 调用顺序：future(client.send).complete() --> future.listeners 执行 --> adapted(新的异步请求).onSuccess
+     * --> adapted.complete() --> adapted.listeners 执行（if present）
      */
     public <S> RequestFuture<S> compose(final RequestFutureAdapter<T, S> adapter) {
         final RequestFuture<S> adapted = new RequestFuture<>();
+        // 由 complete() 方法触发监听器执行
         addListener(new RequestFutureListener<T>() {
             @Override
             public void onSuccess(T value) {

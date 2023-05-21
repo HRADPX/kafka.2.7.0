@@ -145,6 +145,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         // 更新元数据请求
         case ApiKeys.UPDATE_METADATA => handleUpdateMetadataRequest(request)
         case ApiKeys.CONTROLLED_SHUTDOWN => handleControlledShutdownRequest(request)
+        // 提交偏移量
         case ApiKeys.OFFSET_COMMIT => handleOffsetCommitRequest(request)
         case ApiKeys.OFFSET_FETCH => handleOffsetFetchRequest(request)
         // 消费组寻找 coordinator 的请求
@@ -385,6 +386,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     val unauthorizedTopicErrors = mutable.Map[TopicPartition, Errors]()
     val nonExistingTopicErrors = mutable.Map[TopicPartition, Errors]()
     // the callback for sending an offset commit response
+    // 响应回调
     def sendResponseCallback(commitStatus: Map[TopicPartition, Errors]): Unit = {
       val combinedCommitStatus = commitStatus ++ unauthorizedTopicErrors ++ nonExistingTopicErrors
       if (isDebugEnabled)
@@ -399,6 +401,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
 
     // reject the request if not authorized to the group
+    // 授权拒绝
     if (!authorize(request.context, READ, GROUP, offsetCommitRequest.data.groupId)) {
       val error = Errors.GROUP_AUTHORIZATION_FAILED
       val responseTopicList = OffsetCommitRequest.getErrorResponseTopics(
@@ -423,6 +426,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
       sendResponseCallback(errorMap.toMap)
     } else {
+      // 保存正常分区的偏移量信息
       val authorizedTopicRequestInfoBldr = immutable.Map.newBuilder[TopicPartition, OffsetCommitRequestData.OffsetCommitRequestPartition]
 
       val topics = offsetCommitRequest.data.topics.asScala
@@ -473,6 +477,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         //   - If v2/v3/v4 (no explicit commit timestamp) we treat it the same as v5.
         //   - For v5 and beyond there is no per partition expiration timestamp, so this field is no longer in effect
         val currentTimestamp = time.milliseconds
+        // 正常情况，参数封装（key: topicPartition, value: OffsetAndMetadata）
         val partitionData = authorizedTopicRequestInfo.map { case (k, partitionData) =>
           val metadata = if (partitionData.committedMetadata == null)
             OffsetAndMetadata.NoMetadata
@@ -500,12 +505,13 @@ class KafkaApis(val requestChannel: RequestChannel,
         }
 
         // call coordinator to handle commit offset
+        // 提交偏移量处理逻辑
         groupCoordinator.handleCommitOffsets(
           offsetCommitRequest.data.groupId,
           offsetCommitRequest.data.memberId,
           Option(offsetCommitRequest.data.groupInstanceId),
           offsetCommitRequest.data.generationId,
-          partitionData,
+          partitionData,  // 偏移量参数
           sendResponseCallback)
       }
     }

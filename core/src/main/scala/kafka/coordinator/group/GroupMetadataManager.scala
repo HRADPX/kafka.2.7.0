@@ -327,6 +327,7 @@ class GroupMetadataManager(brokerId: Int,
                              records: Map[TopicPartition, MemoryRecords],
                              callback: Map[TopicPartition, PartitionResponse] => Unit): Unit = {
     // call replica manager to append the group message
+    // 复用之前的生产者向服务端写数据的逻辑
     replicaManager.appendRecords(
       timeout = config.offsetCommitTimeoutMs.toLong,
       requiredAcks = config.offsetCommitRequiredAcks,
@@ -347,6 +348,7 @@ class GroupMetadataManager(brokerId: Int,
                    producerId: Long = RecordBatch.NO_PRODUCER_ID,
                    producerEpoch: Short = RecordBatch.NO_PRODUCER_EPOCH): Unit = {
     // first filter out partitions with offset metadata size exceeding limit
+    // 校验元数据长度..
     val filteredOffsetMetadata = offsetMetadata.filter { case (_, offsetAndMetadata) =>
       validateOffsetMetadataLength(offsetAndMetadata.metadata)
     }
@@ -377,7 +379,9 @@ class GroupMetadataManager(brokerId: Int,
             val value = GroupMetadataManager.offsetCommitValue(offsetAndMetadata, interBrokerProtocolVersion)
             new SimpleRecord(timestamp, key, value)
           }
+          // 偏移量保存的分区
           val offsetTopicPartition = new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, partitionFor(group.groupId))
+          // 偏移量信息
           val buffer = ByteBuffer.allocate(AbstractRecords.estimateSizeInBytes(magicValue, compressionType, records.asJava))
 
           if (isTxnOffsetCommit && magicValue < RecordBatch.MAGIC_VALUE_V2)
@@ -387,6 +391,7 @@ class GroupMetadataManager(brokerId: Int,
             producerId, producerEpoch, 0, isTxnOffsetCommit, RecordBatch.NO_PARTITION_LEADER_EPOCH)
 
           records.foreach(builder.append)
+          // 包装成一个 Map
           val entries = Map(offsetTopicPartition -> builder.build())
 
           // set the callback function to insert offsets into cache after log append completed
@@ -469,10 +474,12 @@ class GroupMetadataManager(brokerId: Int,
             }
           } else {
             group.inLock {
+              // 设置标识 receivedConsumerOffsetCommits = true
               group.prepareOffsetCommit(offsetMetadata)
             }
           }
 
+          // 实际执行逻辑
           appendForGroup(group, entries, putCacheCallback)
 
         case None =>

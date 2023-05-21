@@ -1007,6 +1007,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 fetcher.clearBufferedDataForUnassignedTopics(topics);
                 log.info("Subscribed to topic(s): {}", Utils.join(topics, ", "));
                 if (this.subscriptions.subscribe(new HashSet<>(topics), listener))
+                    // 更新元数据
                     metadata.requestUpdateForNewTopics();
             }
         } finally {
@@ -1271,6 +1272,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
             }
 
+            // 循环体
             do {
                 client.maybeTriggerWakeup();
 
@@ -1286,6 +1288,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
                 // 拉取
                 final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = pollForFetches(timer);
+                // 如果有消息，这里会直接返回，否则会一直轮询直到超时并返回空的消息记录
                 if (!records.isEmpty()) {
                     // before returning the fetched records, we can send off the next round of fetches
                     // and avoid block waiting for their responses to enable pipelining while the user
@@ -1301,6 +1304,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 }
             } while (timer.notExpired());
 
+            // 超时推出，还没有拉取到消息（生产者一直没有生产生消息），返回空的消息记录
             return ConsumerRecords.empty();
         } finally {
             release();
@@ -1325,9 +1329,10 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 Math.min(coordinator.timeToNextPoll(timer.currentTimeMs()), timer.remainingMs());
 
         // if data is available already, return it immediately
-        // 首次拉取，这里返回的 records 是空集合
+        // 首次拉取，这里返回的 records 是空集合。但是如果有消息被拉到则立刻返回。
         final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = fetcher.fetchedRecords();
         if (!records.isEmpty()) {
+            // 串行模式
             return records;
         }
 
@@ -1350,6 +1355,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         client.poll(pollTimer, () -> {
             // since a fetch might be completed by the background thread, we need this poll condition
             // to ensure that we do not block unnecessarily in poll()
+            // 判断是否有分区数据已经被拉取，如果是 true，该方法返回 false，表示网络I/O不需要被阻塞，具体体现 selector.selectNow
             return !fetcher.hasAvailableFetches();
         });
         timer.update(pollTimer.currentTimeMs());
@@ -2470,15 +2476,19 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         // coordinator lookup if there are partitions which have missing positions, so
         // a consumer with manually assigned partitions can avoid a coordinator dependence
         // by always ensuring that assigned partitions have an initial position.
+        // 存在有些分区没有有效的拉取偏移量（分区状态为 INITIALIZING）
         if (coordinator != null && !coordinator.refreshCommittedOffsetsIfNeeded(timer)) return false;
 
         // If there are partitions still needing a position and a reset policy is defined,
         // request reset using the default policy. If no reset strategy is defined and there
         // are partitions with a missing position, then we will raise an exception.
+        // 上一步中有些分区没有拉到偏移量请求没有拉到偏移量，把这些分区状态设置为 AWAIT_RESET，然后在下面发送异步请求，
+        // 通过使用默认策略进行 reset position
         subscriptions.resetInitializingPositions();
 
         // Finally send an asynchronous request to lookup and update the positions of any
         // partitions which are awaiting reset.
+        // 发送异步请求，处理上面没有没有拉到偏移量的分区
         fetcher.resetOffsetsIfNeeded();
 
         return true;

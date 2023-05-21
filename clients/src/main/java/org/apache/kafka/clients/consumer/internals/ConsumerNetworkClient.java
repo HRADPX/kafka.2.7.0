@@ -138,6 +138,10 @@ public class ConsumerNetworkClient implements Closeable {
         // wakeup the client in case it is blocking in poll so that we can send the queued request
         // 唤醒，执行 poll 方法
         client.wakeup();
+        // 这里需要注意，这个方法返回的 future 对象是回调 RequestFutureCompletionHandler 里的属性，
+        // 但是对于消费者而言，通常还要通过组合模式（compose）返回一个新的 future 对象，需要区分这两个对象的不同。
+        // 这个方法返回的 future 可以理解为服务端的一般响应，而消费者发送的请求通常需要从这个响应里解析出来想要的数据格式，
+        // 所以通常都会通过组合模式来对不同类型的数据进行转换。
         return completionHandler.future;
     }
 
@@ -593,6 +597,10 @@ public class ConsumerNetworkClient implements Closeable {
         }
     }
 
+    /**
+     * 这个类实现了 RequestCompletionHandler 这个回调接口，请求返回后会调用这个接口的
+     * {@link #onComplete(ClientResponse)} 方法来执行回调
+     */
     private class RequestFutureCompletionHandler implements RequestCompletionHandler {
         private final RequestFuture<ClientResponse> future;
         private ClientResponse response;
@@ -614,7 +622,11 @@ public class ConsumerNetworkClient implements Closeable {
             } else if (response.versionMismatch() != null) {
                 future.raise(response.versionMismatch());
             } else {
-                // 成功
+                // 成功，complete() 方法会设置 future 对象的里的 result 的值，即请求的结果。
+                // 注意这里的 future 对象是 client.send 的返回的对象，所以通过 complete() 方法设置完成 result 后
+                // client.send 返回的 future 可以看作是已经完成（因为 result 有值了）。而对消费者发送的请求而言，
+                // 实际的返回值是通过组合模式（compose）返回的 future 对象，这个 future 还没有调用 complete 方法，
+                // 需要调用
                 future.complete(response);
             }
         }

@@ -110,6 +110,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     private MetadataSnapshot metadataSnapshot;
     private MetadataSnapshot assignmentSnapshot;
     private Timer nextAutoCommitTimer;
+    // 提交偏移量失败标记
     private AtomicBoolean asyncCommitFenced;
     private ConsumerGroupMetadata groupMetadata;
     private final boolean throwOnFetchStableOffsetsUnsupported;
@@ -377,6 +378,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         Set<TopicPartition> assignedPartitions = new HashSet<>(assignment.partitions());
 
+        // 订阅的 topic 和分配到的 topic 不匹配，需要重新加入消费组
         if (!subscriptions.checkAssignmentMatchedSubscription(assignedPartitions)) {
             log.warn("We received an assignment {} that doesn't match our current subscription {}; it is likely " +
                 "that the subscription has changed since we joined the group. Will try re-join the group with current subscription",
@@ -423,9 +425,11 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         maybeUpdateJoinedSubscription(assignedPartitions);
 
         // Catch any exception here to make sure we could complete the user callback.
+        // default do nothing
         firstException.compareAndSet(null, invokeOnAssignment(assignor, assignment));
 
         // Reschedule the auto commit starting from now
+        // 下次自动提交 offset 的时间
         if (autoCommitEnabled)
             this.nextAutoCommitTimer.updateAndReset(autoCommitIntervalMs);
 
@@ -539,6 +543,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             }
         }
 
+        // 每次在轮询过程中需要判断是否可以自动提交 offset
         // 异步提交 offset
         maybeAutoCommitOffsetsAsync(timer.currentTimeMs());
         return true;
@@ -704,6 +709,9 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         log.debug("Executing onJoinPrepare with generation {} and memberId {}", generation, memberId);
         // commit offsets prior to rebalance if auto-commit enabled
         // 如果是自动提交，在 re-balance 前需要先执行下 commit offset
+        // 这里提交 offset 是因为 rebalance 会导致分区重分配（如集群新增一个消费者需要从其他消费者的分配分区里分配一
+        // 些分区给这个新的消费者，这个新消费者后续需要知道从哪个位置拉取消息会发送请求给协调者查询拉取 offset，
+        // 这就需要这些分区的前拥有者提交之前的 offset）。与定时提交 offset 不同的是，
         maybeAutoCommitOffsetsSync(time.timer(rebalanceConfig.rebalanceTimeoutMs));
 
         // the generation / member-id can possibly be reset by the heartbeat thread
@@ -836,16 +844,22 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      *
      * @param timer Timer bounding how long this method can block
      * @return true iff the operation completed within the timeout
+     *
+     * 更新分区状态中已经提交偏移量
      */
     public boolean refreshCommittedOffsetsIfNeeded(Timer timer) {
+        // 状态为 INITIALIZING 的分区
         final Set<TopicPartition> initializingPartitions = subscriptions.initializingPartitions();
 
+        // 发送获取偏移量请求（OFFSET_FETCH) 给服务端的协调者节点
         final Map<TopicPartition, OffsetAndMetadata> offsets = fetchCommittedOffsets(initializingPartitions, timer);
         if (offsets == null) return false;
 
         for (final Map.Entry<TopicPartition, OffsetAndMetadata> entry : offsets.entrySet()) {
             final TopicPartition tp = entry.getKey();
             final OffsetAndMetadata offsetAndMetadata = entry.getValue();
+            // 如果没有已提交的偏移量，返回的就是 null，比如消费者都是首次启动或新增加了一些分区，
+            // 这些场景下分区没有被消费过自然也不会有消费者提交偏移量
             if (offsetAndMetadata != null) {
                 // first update the epoch if necessary
                 entry.getValue().leaderEpoch().ifPresent(epoch -> this.metadata.updateLastSeenEpochIfNewer(entry.getKey(), epoch));
@@ -858,6 +872,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                             offsetAndMetadata.offset(), offsetAndMetadata.leaderEpoch(),
                             leaderAndEpoch);
 
+                    // 协调节点保存的数据更新到客户端
                     this.subscriptions.seekUnvalidated(tp, position);
 
                     log.info("Setting offset for partition {} to the committed offset {}", tp, position);
@@ -895,9 +910,11 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             if (pendingCommittedOffsetRequest != null) {
                 future = pendingCommittedOffsetRequest.response;
             } else {
+                // 将请求放到 unsent 数据结构中，会在下面的 poll 方法中执行网络请求
                 future = sendOffsetFetchRequest(partitions);
                 pendingCommittedOffsetRequest = new PendingCommittedOffsetRequest(partitions, generationForOffsetRequest, future);
             }
+            // 发送请求
             client.poll(future, timer);
 
             if (future.isDone()) {
@@ -946,6 +963,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
     // visible for testing
     void invokeCompletedOffsetCommitCallbacks() {
+        // 提交偏移量失败标记，在提交偏移量的异步请求后添加监听器中，在失败的场景下对该属性进行赋值
         if (asyncCommitFenced.get()) {
             throw new FencedInstanceIdException("Get fenced exception for group.instance.id "
                 + rebalanceConfig.groupInstanceId.orElse("unset_instance_id")
@@ -962,9 +980,11 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
     }
 
     public void commitOffsetsAsync(final Map<TopicPartition, OffsetAndMetadata> offsets, final OffsetCommitCallback callback) {
+        // 执行异步提交 offset 的回调
         invokeCompletedOffsetCommitCallbacks();
 
         if (!coordinatorUnknown()) {
+            // 协调者存在，发送请求
             doCommitOffsetsAsync(offsets, callback);
         } else {
             // we don't know the current coordinator, so try to find it and then send the commit
@@ -973,6 +993,9 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             // coordinator lookup request. This is fine because the listeners will be invoked in
             // the same order that they were added. Note also that AbstractCoordinator prevents
             // multiple concurrent coordinator lookup requests.
+            // 不存在，寻找协调者，并将这些提交 offset 的请求添加到监听器中，等完成寻找协调者的请求后，
+            // 再通过执行监听器的方式来提交 offset。
+            // 这样处理可以避免多个并发的查找协调者的请求，也保证了多个提交 offset 请求的顺序不变。
             pendingAsyncCommits.incrementAndGet();
             lookupCoordinator().addListener(new RequestFutureListener<Void>() {
                 @Override
@@ -999,12 +1022,14 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
     private void doCommitOffsetsAsync(final Map<TopicPartition, OffsetAndMetadata> offsets, final OffsetCommitCallback callback) {
         RequestFuture<Void> future = sendOffsetCommitRequest(offsets);
+        // 默认的回调不执行任何实际操作
         final OffsetCommitCallback cb = callback == null ? defaultOffsetCommitCallback : callback;
         future.addListener(new RequestFutureListener<Void>() {
             @Override
             public void onSuccess(Void value) {
                 if (interceptors != null)
                     interceptors.onCommit(offsets);
+                // 提交 offset 请求完成，添加到 completedOffsetCommits 队列中，后续继续处理..
                 completedOffsetCommits.add(new OffsetCommitCompletion(cb, offsets, null));
             }
 
@@ -1081,13 +1106,16 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         if (autoCommitEnabled) {
             nextAutoCommitTimer.update(now);
             if (nextAutoCommitTimer.isExpired()) {
+                // 重置提交时间
                 nextAutoCommitTimer.reset(autoCommitIntervalMs);
+                // 执行提交请求
                 doAutoCommitOffsetsAsync();
             }
         }
     }
 
     private void doAutoCommitOffsetsAsync() {
+        // 获取到
         Map<TopicPartition, OffsetAndMetadata> allConsumedOffsets = subscriptions.allConsumed();
         log.debug("Sending asynchronous auto-commit of offsets {}", allConsumedOffsets);
 
@@ -1147,11 +1175,12 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             return RequestFuture.voidSuccess();
 
         Node coordinator = checkAndGetCoordinator();
+        // 类似 fast-fail
         if (coordinator == null)
             return RequestFuture.coordinatorNotAvailable();
 
         // create the offset commit request
-        // 构造请求
+        // 构造请求, 将 TopicPartition 和 OffsetAndMetadata -> OffsetCommitRequestTopic（封装了 topicName、分区以及偏移量的信息）
         Map<String, OffsetCommitRequestData.OffsetCommitRequestTopic> requestTopicDataMap = new HashMap<>();
         for (Map.Entry<TopicPartition, OffsetAndMetadata> entry : offsets.entrySet()) {
             TopicPartition topicPartition = entry.getKey();
@@ -1237,10 +1266,11 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                     long offset = offsetAndMetadata.offset();
 
                     Errors error = Errors.forCode(partition.errorCode());
-                    // success and do nothing
+                    // 成功，无其他操作
                     if (error == Errors.NONE) {
                         log.debug("Committed offset {} for partition {}", offset, tp);
                     } else {
+                        // 下面都是异常的 case
                         if (error.exception() instanceof RetriableException) {
                             log.warn("Offset commit failed on partition {} at offset {}: {}", tp, offset, error.message());
                         } else {
@@ -1293,6 +1323,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                              * request re-join but do not reset generations. If the callers decide to retry they
                              * can go ahead and call poll to finish up the rebalance first, and then try commit again.
                              */
+                            // 服务端正在再平衡
                             requestRejoin();
                             future.raise(new RebalanceInProgressException("Offset commit cannot be completed since the " +
                                 "consumer group is executing a rebalance at the moment. You can try completing the rebalance " +
@@ -1349,7 +1380,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         // send the request with a callback
         return client.send(coordinator, requestBuilder)
-                .compose(new OffsetFetchResponseHandler());
+                .compose(new OffsetFetchResponseHandler()); // 回调
     }
 
     private class OffsetFetchResponseHandler extends CoordinatorResponseHandler<OffsetFetchResponse, Map<TopicPartition, OffsetAndMetadata>> {
@@ -1359,6 +1390,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         @Override
         public void handle(OffsetFetchResponse response, RequestFuture<Map<TopicPartition, OffsetAndMetadata>> future) {
+            // 异常
             if (response.hasError()) {
                 Errors error = response.error();
                 log.debug("Offset fetch failed: {}", error.message());
@@ -1406,8 +1438,10 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 } else if (partitionData.offset >= 0) {
                     // record the position with the offset (-1 indicates no committed offset to fetch);
                     // if there's no committed offset, record as null
+                    // 保存分区和对应的已提交的 offset
                     offsets.put(tp, new OffsetAndMetadata(partitionData.offset, partitionData.leaderEpoch, partitionData.metadata));
                 } else {
+                    // 没有返回null
                     log.info("Found no committed offset for partition {}", tp);
                     offsets.put(tp, null);
                 }

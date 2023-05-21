@@ -143,6 +143,7 @@ public class Fetcher<K, V> implements Closeable {
     private final int fetchSize;
     private final long retryBackoffMs;
     private final long requestTimeoutMs;
+    // 单次最大拉取的消息数
     private final int maxPollRecords;
     private final boolean checkCrcs;
     private final String clientRackId;
@@ -301,6 +302,7 @@ public class Fetcher<K, V> implements Closeable {
                             Set<TopicPartition> partitions = new HashSet<>(response.responseData().keySet());
                             FetchResponseMetricAggregator metricAggregator = new FetchResponseMetricAggregator(sensors, partitions);
 
+                            // 按分区返回数据
                             for (Map.Entry<TopicPartition, FetchResponse.PartitionData<Records>> entry : response.responseData().entrySet()) {
                                 TopicPartition partition = entry.getKey();
                                 FetchRequest.PartitionData requestData = data.sessionPartitions().get(partition);
@@ -319,7 +321,7 @@ public class Fetcher<K, V> implements Closeable {
                                     // Received fetch response for missing session partition
                                     throw new IllegalStateException(message);
                                 } else {
-                                    // 拉取到数据
+                                    // 拉取到数据 todo huangran 拉取到数据后什么时候更新下次拉取的 offset
                                     long fetchOffset = requestData.fetchOffset;
                                     FetchResponse.PartitionData<Records> partitionData = entry.getValue();
 
@@ -329,7 +331,8 @@ public class Fetcher<K, V> implements Closeable {
                                     Iterator<? extends RecordBatch> batches = partitionData.records().batches().iterator();
                                     short responseVersion = resp.requestHeader().apiVersion();
 
-                                    // 保存拉取的数据到 completedFetches 中
+                                    // 保存拉取的数据到 completedFetches 中（分区粒度）
+                                    // 消费者为了获取到消息，需要主动调用 fetchRecords 方法从这个队列中获取
                                     completedFetches.add(new CompletedFetch(partition, partitionData,
                                             metricAggregator, batches, fetchOffset, responseVersion));
                                 }
@@ -481,6 +484,7 @@ public class Fetcher<K, V> implements Closeable {
         if (exception != null)
             throw exception;
 
+        // 状态为 AWAIT_RESET 和重试的分区
         Set<TopicPartition> partitions = subscriptions.partitionsNeedingReset(time.milliseconds());
         if (partitions.isEmpty())
             return;
@@ -492,6 +496,7 @@ public class Fetcher<K, V> implements Closeable {
                 offsetResetTimestamps.put(partition, timestamp);
         }
 
+        // 发送异步重置 offset 请求
         resetOffsetsAsync(offsetResetTimestamps);
     }
 
@@ -612,9 +617,11 @@ public class Fetcher<K, V> implements Closeable {
      * @throws TopicAuthorizationException If there is TopicAuthorization error in fetchResponse.
      */
     public Map<TopicPartition, List<ConsumerRecord<K, V>>> fetchedRecords() {
+        // 这个临时变量表示本次会被消费者处理的记录，它从全局变量 completedFetches 中获取一定数量的消息返回，
+        // 全局变量记录的是还没有被消费者处理的所有记录
         Map<TopicPartition, List<ConsumerRecord<K, V>>> fetched = new HashMap<>();
         Queue<CompletedFetch> pausedCompletedFetches = new ArrayDeque<>();
-        // 最大拉取的记录数
+        // 最大拉取的记录数，通过这个变量用来控制单次轮询最大处理的消息的数量
         int recordsRemaining = maxPollRecords;
 
         try {
@@ -687,33 +694,41 @@ public class Fetcher<K, V> implements Closeable {
     }
 
     private List<ConsumerRecord<K, V>> fetchRecords(CompletedFetch completedFetch, int maxRecords) {
+        // 判断这个分区是否是分配给这个消费者的，因为分配的分区可能会发生变化，如再平衡...
         if (!subscriptions.isAssigned(completedFetch.partition)) {
             // this can happen when a rebalance happened before fetched records are returned to the consumer's poll call
             log.debug("Not returning fetched records for partition {} since it is no longer assigned",
                     completedFetch.partition);
+            // 判断这个消费者的订阅状态，看这个分区是否是可拉取的，因为可能在发送完拉取数据请求后，在没有返回响应前，消费者取消了对这个分区的
+            // 拉取，如调用了 pause() 方法暂停对这个分区进行拉取，但是服务端是无法感知到这个动作的，它仍然会将这个取消的分区数据返回
         } else if (!subscriptions.isFetchable(completedFetch.partition)) {
             // this can happen when a partition is paused before fetched records are returned to the consumer's
             // poll call or if the offset is being reset
             log.debug("Not returning fetched records for assigned partition {} since it is no longer fetchable",
                     completedFetch.partition);
+            // 正常场景
         } else {
             FetchPosition position = subscriptions.position(completedFetch.partition);
             if (position == null) {
                 throw new IllegalStateException("Missing position for fetchable partition " + completedFetch.partition);
             }
 
+            // 判断分区记录的拉取偏移量是否和订阅状态的偏移量相同，如果不一样，表示这个响应是先前的请求产生的，会被忽略
             if (completedFetch.nextFetchOffset == position.offset) {
+                // 限制每次最多获取的记录数
                 List<ConsumerRecord<K, V>> partRecords = completedFetch.fetchRecords(maxRecords);
 
                 log.trace("Returning {} fetched records at offset {} for assigned partition {}",
                         partRecords.size(), position, completedFetch.partition);
 
+                // 拉取到了消息
                 if (completedFetch.nextFetchOffset > position.offset) {
                     FetchPosition nextPosition = new FetchPosition(
                             completedFetch.nextFetchOffset,
                             completedFetch.lastEpoch,
                             position.currentLeader);
                     log.trace("Update fetching position to {} for partition {}", nextPosition, completedFetch.partition);
+                    // 更新下次拉取数据的偏移量
                     subscriptions.position(completedFetch.partition, nextPosition);
                 }
 
@@ -752,8 +767,10 @@ public class Fetcher<K, V> implements Closeable {
     }
 
     private void resetOffsetsAsync(Map<TopicPartition, Long> partitionResetTimestamps) {
+        // 按节点进行合并
         Map<Node, Map<TopicPartition, ListOffsetPartition>> timestampsToSearchByNode =
                 groupListOffsetRequests(partitionResetTimestamps, new HashSet<>());
+
         for (Map.Entry<Node, Map<TopicPartition, ListOffsetPartition>> entry : timestampsToSearchByNode.entrySet()) {
             Node node = entry.getKey();
             final Map<TopicPartition, ListOffsetPartition> resetTimestamps = entry.getValue();
@@ -768,6 +785,7 @@ public class Fetcher<K, V> implements Closeable {
                         metadata.requestUpdate();
                     }
 
+                    // 这里最终也是调用 TopicPartitionState.seekUnvalidated 方法设置分区的拉取偏移量
                     for (Map.Entry<TopicPartition, ListOffsetData> fetchedOffset : result.fetchedOffsets.entrySet()) {
                         TopicPartition partition = fetchedOffset.getKey();
                         ListOffsetData offsetData = fetchedOffset.getValue();
@@ -996,6 +1014,7 @@ public class Fetcher<K, V> implements Closeable {
     private RequestFuture<ListOffsetResult> sendListOffsetRequest(final Node node,
                                                                   final Map<TopicPartition, ListOffsetPartition> timestampsToSearch,
                                                                   boolean requireTimestamp) {
+        //  ApiKeys = LIST_OFFSETS
         ListOffsetRequest.Builder builder = ListOffsetRequest.Builder
                 .forConsumer(requireTimestamp, isolationLevel)
                 .setTargetTimes(ListOffsetRequest.toListOffsetTopics(timestampsToSearch));
@@ -1118,6 +1137,9 @@ public class Fetcher<K, V> implements Closeable {
         }
     }
 
+    /**
+     * 这里会去除掉那些先前拉取到消息但还没有被客户端消费完的分区
+     */
     private List<TopicPartition> fetchablePartitions() {
         Set<TopicPartition> exclude = new HashSet<>();
         if (nextInLineFetch != null && !nextInLineFetch.isConsumed) {
@@ -1178,7 +1200,9 @@ public class Fetcher<K, V> implements Closeable {
         long currentTimeMs = time.milliseconds();
 
         // todo huangran 确认这个里的分区是什么时候加入的
-        // 所有的分区
+        // 所有的分区，因为消费者采用轮询的方式每次只处理一小批的记录（为了保证消息能被快速消费，避免长时间没有调用
+        // poll 方法而导致再平衡），而不是拉取到的所有记录。那么每个分区记录可能会分多次才会被完全处理，所以这里的
+        // fetchablePartitions() 方法会将还没有被客户端完全处理完毕的分区给排除掉，即不会再拉取这个分区的数据。
         for (TopicPartition partition : fetchablePartitions()) {
             // 上次消费的 position
             FetchPosition position = this.subscriptions.position(partition);
@@ -1498,6 +1522,7 @@ public class Fetcher<K, V> implements Closeable {
         private CloseableIterator<Record> records;
         private long nextFetchOffset;
         private Optional<Integer> lastEpoch;
+        // 消费是否被消费的标识
         private boolean isConsumed = false;
         private Exception cachedRecordException = null;
         private boolean corruptLastRecord = false;
@@ -1646,6 +1671,7 @@ public class Fetcher<K, V> implements Closeable {
                     }
                     if (lastRecord == null)
                         break;
+                    // 解析消息
                     records.add(parseRecord(partition, currentBatch, lastRecord));
                     recordsRead++;
                     bytesRead += lastRecord.sizeInBytes();

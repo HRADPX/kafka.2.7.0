@@ -735,9 +735,11 @@ class GroupCoordinator(val brokerId: Int,
               doCommitOffsets(group, memberId, groupInstanceId, generationId, offsetMetadata, responseCallback)
             } else {
               // or this is a request coming from an older generation. either way, reject the commit
+              // 请求来自之前的 generation，本次提交需要拒绝
               responseCallback(offsetMetadata.map { case (k, _) => k -> Errors.ILLEGAL_GENERATION })
             }
 
+            // 正常场景
           case Some(group) =>
             doCommitOffsets(group, memberId, groupInstanceId, generationId, offsetMetadata, responseCallback)
         }
@@ -798,17 +800,20 @@ class GroupCoordinator(val brokerId: Int,
         responseCallback(offsetMetadata.map { case (k, _) => k -> Errors.FENCED_INSTANCE_ID })
       } else if (generationId < 0 && group.is(Empty)) {
         // The group is only using Kafka to store offsets.
+        // 使用 Kafka 存储 offset
         groupManager.storeOffsets(group, memberId, offsetMetadata, responseCallback)
       } else if (!group.has(memberId)) {
         responseCallback(offsetMetadata.map { case (k, _) => k -> Errors.UNKNOWN_MEMBER_ID })
       } else if (generationId != group.generationId) {
         responseCallback(offsetMetadata.map { case (k, _) => k -> Errors.ILLEGAL_GENERATION })
       } else {
+        // 消费组当前的状态，只有 Stable 和 PreparingRebalance 可以提交
         group.currentState match {
           case Stable | PreparingRebalance =>
             // During PreparingRebalance phase, we still allow a commit request since we rely
             // on heartbeat response to eventually notify the rebalance in progress signal to the consumer
             val member = group.get(memberId)
+            // 执行心跳 todo huangran 这里为什么要执行心跳
             completeAndScheduleNextHeartbeatExpiration(group, member)
             groupManager.storeOffsets(group, memberId, offsetMetadata, responseCallback)
 
