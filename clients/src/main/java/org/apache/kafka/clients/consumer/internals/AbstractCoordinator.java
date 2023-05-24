@@ -827,6 +827,7 @@ public abstract class AbstractCoordinator implements Closeable {
                     }
                 }
             } else {
+                // 同步失败，重置 rejoin 标识，表示这个消费者需要重新加入消费组
                 requestRejoin();
 
                 if (error == Errors.GROUP_AUTHORIZATION_FAILED) {
