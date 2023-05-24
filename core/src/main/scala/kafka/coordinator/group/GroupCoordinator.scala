@@ -195,10 +195,17 @@ class GroupCoordinator(val brokerId: Int,
               // 新消费者首次加入
               doUnknownJoinGroup(group, groupInstanceId, requireKnownMemberId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs, protocolType, protocols, responseCallback)
             } else {
+              // 非首次加入，可能断联后重新连接或者发生再平衡事件
               doJoinGroup(group, memberId, groupInstanceId, clientId, clientHost, rebalanceTimeoutMs, sessionTimeoutMs, protocolType, protocols, responseCallback)
             }
 
             // attempt to complete JoinGroup
+            // 如果是 PreparingRebalance 状态，尝试完成一下延迟操作
+            // 这里为什么要检查是否完成，首先如果消费组是初始化状态（Empty）下消费者加入消费组，消费组创建的延迟操作是 InitialDelayedJoin,
+            // 这里是检查完成的方法永远返回 false。
+            // 但是如果是消费组发生再平衡，消费组创建的延迟操作是 DelayedJoin，而且协调者处理加入请求时并不是每次都会创建延迟操作，即并不会
+            // 每次都调用创建延迟操作后的 tryCompleteElseWatch() 方法，并且延迟操作相关的外部事件可能会完成它（即加入消费组这个动作），
+            // 所以只要有触发的外部事件，就应该调用该方式尝试尽快完成。
             if (group.is(PreparingRebalance)) {
               joinPurgatory.checkAndComplete(GroupKey(group.groupId))
             }
@@ -289,6 +296,7 @@ class GroupCoordinator(val brokerId: Int,
             clientId, clientHost, protocolType, protocols, group, responseCallback)
         }
       } else {
+        // false
         val groupInstanceIdNotFound = groupInstanceId.isDefined && !group.hasStaticMember(groupInstanceId)
         if (group.isStaticMemberFenced(memberId, groupInstanceId, "join-group")) {
           // given member id doesn't match with the groupInstanceId. Inform duplicate instance to shut down immediately.
@@ -299,14 +307,15 @@ class GroupCoordinator(val brokerId: Int,
             // it reset its member id and retry.
           responseCallback(JoinGroupResult(memberId, Errors.UNKNOWN_MEMBER_ID))
         } else {
-          // 首次应该为 null
           val member = group.get(memberId)
 
           group.currentState match {
+              // 正常消费组稳定状态 Stable，新的消费者加入将消费组状态变更为 PreparingRebalance
             case PreparingRebalance =>
               updateMemberAndRebalance(group, member, protocols, s"Member ${member.memberId} joining group during ${group.currentState}", responseCallback)
 
             case CompletingRebalance =>
+              // 元数据没有变更，这种状态下可能是消费者客户端没有收到之前服务端返回的响应，触发了重试，这种情况直接返回和上次相同的数据即可
               if (member.matches(protocols)) {
                 // member is joining with the same metadata (which could be because it failed to
                 // receive the initial JoinGroup response), so just return current group information
@@ -325,9 +334,11 @@ class GroupCoordinator(val brokerId: Int,
                   error = Errors.NONE))
               } else {
                 // member has changed metadata, so force a rebalance
+                // 元数据发生了变更，强制执行 rebalance
                 updateMemberAndRebalance(group, member, protocols, s"Updating metadata for member ${member.memberId} during ${group.currentState}", responseCallback)
               }
 
+            // 可能是重新连接或者心跳超时等场景
             case Stable =>
               val member = group.get(memberId)
               if (group.isLeader(memberId)) {
@@ -336,10 +347,12 @@ class GroupCoordinator(val brokerId: Int,
                 // which do not affect the member metadata (such as topic metadata changes for the consumer)
                 updateMemberAndRebalance(group, member, protocols, s"leader ${member.memberId} re-joining group during ${group.currentState}", responseCallback)
               } else if (!member.matches(protocols)) {
+                // 元数据发生变更
                 updateMemberAndRebalance(group, member, protocols, s"Updating metadata for member ${member.memberId} during ${group.currentState}", responseCallback)
               } else {
                 // for followers with no actual change to their metadata, just return group information
                 // for the current generation which will allow them to issue SyncGroup
+                // 非主消费者重复加入，可能触发重试等
                 responseCallback(JoinGroupResult(
                   members = List.empty,
                   memberId = memberId,
@@ -350,6 +363,7 @@ class GroupCoordinator(val brokerId: Int,
                   error = Errors.NONE))
               }
 
+              // memberId 不可空，但是消费组状态是 Empty，这是不合法的状态
             case Empty | Dead =>
               // Group reaches unexpected state. Let the joining member reset their generation and rejoin.
               warn(s"Attempt to add rejoining member $memberId of group ${group.groupId} in " +
@@ -469,7 +483,8 @@ class GroupCoordinator(val brokerId: Int,
           case Stable =>
             // if the group is stable, we just return the current assignment
             // 如果某个 follower 消费者发送 SYNC GROUP 请求迟了，leader 消费者已经将消费组的状态变更为 Stable，这里也没有关系，因为
-            // 所有这个节点的分区的分区已经在 leader 消费者的 SYNC GROUP 请求设置了，这里直接使用回调函数返回，并重置下心跳
+            // 所有这个节点的分配的分区已经在 leader 消费者的 SYNC GROUP 请求设置了并保存到了元数据的 assignment 里了，
+            // 这里直接使用回调函数返回分配的分区，并重置下心跳即可。
             val memberMetadata = group.get(memberId)
             responseCallback(SyncGroupResult(group.protocolType, group.protocolName, memberMetadata.assignment, Errors.NONE))
             // 重置心跳
@@ -1192,6 +1207,28 @@ class GroupCoordinator(val brokerId: Int,
   // package private for testing
   private[group] def prepareRebalance(group: GroupMetadata, reason: String): Unit = {
     // if any members are awaiting sync, cancel their request and have them rejoin
+    /**
+     * 正常流程加入消费组这个条件不会满足，可以先 pass。
+     *
+     * 满足这个的条件：
+     *  1）正常流程所有消费者已经都加入消费组，并且协调者也返回了响应，消费组状态变更为 CompletingRebalance，在消费者发送
+     *  "同步消费组" 请求之前，一个新的消费者此时加入了消费组。
+     *  2）
+     *
+     * 如果状态是 CompletingRebalance（等待同步，表示消费组协调者在等待消费者发送同步请求），即所有的加入请求的响应已经返回，
+     * 主消费在为这些消费者分配分区，此时执行这个方法，可能表示有消费者加入（需要给这个消费者分配分区），这里给消费组里的所有消费
+     * 者发送 REBALANCE_IN_PROGRESS 的错误，同时清空所有消费者分配的结果，让所有消费者重新加入消费组。
+     *
+     * 注意，如果消费组状态是 CompletingRebalance，如果有消费者已经发送了 "同步消费组" 请求，元数据里的同步回调不为空，
+     * 这个方法会执行回调返回 REBALANCE_IN_PROGRESS 的错误，然后回调函数被置为空。 如果还没有发送请求，回调函数也是为空，
+     * 自然也不会执行回调。
+     *
+     * 如果后续上面那些没有发送 "同步消费组" 请求的消费者发送了请求，在处理请求时，但是发现消费组状态为 PreparingRebalance，
+     * 同样会返回 REBALANCE_IN_PROGRESS 错误，表示消费组在执行再平衡操作，这些消费者收到这个错误后，会重新发送 "加入消费组" 请求。
+     *
+     *
+     *
+     */
     if (group.is(CompletingRebalance))
       resetAndPropagateAssignmentError(group, Errors.REBALANCE_IN_PROGRESS)
 
@@ -1214,6 +1251,11 @@ class GroupCoordinator(val brokerId: Int,
      * 会让更多的消费者加入消费组，所以这该方法里会重新初始化一个新的 InitialDelayedJoin 开始新的一轮等待，同理如果有新的消费者加入同样也会执行相同
      * 的操作，直到等待到了最大的超时时间（默认是 300s）。否则（在新的一轮等待中无新的消费者加入消费组）该方法实际是调用父类的方法。
      * 在父类方法中，调用协调器的 onCompleteJoin() 方法，在该方法中将 leader 消费者的响应返回给客户端。
+     *
+     * 如果当前消费组状态不是 Empty，表示发生了再平衡的场景（订阅的主题发生变化、心跳超时、分区数量变化，消费组中消费者数量变化），此时创建的延迟
+     * 操作实现是 DelayedJoin，它的超时时间是 5 分钟，如果 5 分钟之内所有的消费者完成了加入消费组，协调者处理每个加入请求后都会尝试完成一下
+     * 这个延迟操作，因为并不是非要等到超时时间才强制执行，延迟操作另一个完成方式是由它关联的外部事件触发完成，这也可以解释为什么每次加入消费组后都会
+     * 尝试完成延迟操作。
      * [[DelayedOperationPurgatory.expirationReaper]] 后台线程轮询超时任务线程
      * [[DelayedOperation.onComplete()]]
      * [[GroupCoordinator.onCompleteJoin()]]
