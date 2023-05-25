@@ -487,7 +487,8 @@ class GroupCoordinator(val brokerId: Int,
             // 这里直接使用回调函数返回分配的分区，并重置下心跳即可。
             val memberMetadata = group.get(memberId)
             responseCallback(SyncGroupResult(group.protocolType, group.protocolName, memberMetadata.assignment, Errors.NONE))
-            // 重置心跳
+            // 重置心跳，因为在消费者返回 SYNC GROUP 请求时，这个消费者元数据里的同步回调函数为空，是不会完成心跳的。这里重置心跳是告诉协调者
+            // 虽然发送 SYNC GROUP 请求迟了，但是还是存活状态。
             completeAndScheduleNextHeartbeatExpiration(group, group.get(memberId))
 
           case Dead =>
@@ -1016,16 +1017,29 @@ class GroupCoordinator(val brokerId: Int,
 
   /**
    * Complete existing DelayedHeartbeats for the given member and schedule the next one
+   * 这里心跳的超时时间是消费者级别的，而不是消费组级别
    */
   private def completeAndScheduleNextHeartbeatExpiration(group: GroupMetadata, member: MemberMetadata): Unit = {
     completeAndScheduleNextExpiration(group, member, member.sessionTimeoutMs)
   }
 
+  /**
+   * todo huangran 补充可以完成的其他场景
+   * 完成本次心跳，并调度下一次心跳
+   * 判断延迟心跳是否能够完成（tryComplete()）的条件：
+   *  1. 如果是新的消费者（第一次加入消费组，并且 "加入消费组" 的响应还没有返回给消费者），根据 [[MemberMetadata.heartbeatSatisfied]]
+   *  的值判断是否可以完成。
+   *  2. 消费者元数据里的加入回调或同步回调不为空。
+   *  3. 其他情况看 [[MemberMetadata.heartbeatSatisfied]] 的值
+   */
   private def completeAndScheduleNextExpiration(group: GroupMetadata, member: MemberMetadata, timeoutMs: Long): Unit = {
     val memberKey = MemberKey(member.groupId, member.memberId)
 
     // complete current heartbeat expectation
     member.heartbeatSatisfied = true
+    // 检查延迟缓存里是否有延迟心跳，如果有并尝试完成（无特殊情况下都可以完成），这个方法执行有两种结果
+    // 1. 延迟缓存中有延迟心跳，可以完成，并将旧的延迟心跳从缓存中移除
+    // 2. 延迟缓存中无延迟心跳，直接返回
     heartbeatPurgatory.checkAndComplete(memberKey)
 
     // reschedule the next heartbeat expiration deadline
@@ -1033,6 +1047,7 @@ class GroupCoordinator(val brokerId: Int,
     // 封装一个延迟任务，判断心跳是否超时间
     val delayedHeartbeat = new DelayedHeartbeat(this, group, member.memberId, isPending = false, timeoutMs)
     // 时间轮机制
+    // 尝试完成延迟心跳，一定不能完成，因为这个延迟心跳是刚刚创建的，会将这个延迟心跳放到缓存中
     heartbeatPurgatory.tryCompleteElseWatch(delayedHeartbeat, Seq(memberKey))
   }
 
@@ -1090,6 +1105,7 @@ class GroupCoordinator(val brokerId: Int,
     // 延迟心跳，用户检测会话超时，在 re-balance 时会停止心跳
     // 如果客户端确实断开连接（例如，由于长时间重新平衡期间的请求超时），他们可能会简单地重试，这将导致重新平衡中有很多已失效的成员。
     // 为防止这种情况无限期地发生，会暂停对新成员的 JoinGroup 请求。 如果新成员仍然存在，则让它重试。
+    // 正常逻辑加入逻辑这里是消费者第一次创建延迟心跳，但是因为缓存中还没有这个消费者的延迟心跳，所以第一次不会真正执行该方法的。
     completeAndScheduleNextExpiration(group, member, NewMemberJoinTimeoutMs)  // 300s
 
     if (member.isStaticMember) {
@@ -1239,7 +1255,7 @@ class GroupCoordinator(val brokerId: Int,
      *  （1）新消费者加入时，消费组中原来的消费者有部分消费者已经发送 "同步消费组" 请求，这些消费者的元数据回调不为空，所以在下面方法执行
      * 时会返回 "同步消费组" 响应，不过返回的是错误的响应，消费者收到会重新加入消费组。
      *  （2）新消费者加入消费组之前消费组中原来的消费者没有一个发送 "同步消费组" 请求，此时下面的方法执行时不会执行同步回调，后续过程中原先的
-     * 消费者陆续发送 "同步消费组" 请求，协调者返回 REBALANCE_IN_PROGRESS 错误，让消费者重新加入消费组。
+     * 消费者陆续发送 "同步消费组" 请求，由于状态已经是 PreparingRebalance， 协调者返回 REBALANCE_IN_PROGRESS 错误，让消费者重新加入消费组。
      *  （3）新消费者加入消费组之前消费组中原来的消费者都发送了 "同步消费组" 请求，这个不可能，因为存在同步锁，如果原先所有消费者都发送
      * 了 "同步消费组" 请求，新的消费者因为锁互斥无法进入这里的处理逻辑。
      * 随着原先消费者发送 "加入消费组" 请求，[[GroupMetadata.numMembersAwaitingJoin]] 不断自增，直到最后一个消费者加入，此时消费组
@@ -1255,10 +1271,10 @@ class GroupCoordinator(val brokerId: Int,
     /**
      * 消费组的初始状态是 Empty.
      * 这里需要注意的是，首个消费者加入消费组后，并没有直接执行 JOIN GROUP 的回调返回给消费者客户端，而是在加入消费组后将回调函数保存到
-     * MemberMetadata.awaitingJoinCallback 属性中。这是因为服务端需要等待尽可能多的其他消费者加入消费组，来进行后面的 re-balance 操作，
+     * [[MemberMetadata.awaitingJoinCallback]] 属性中。这是因为服务端需要等待尽可能多的其他消费者加入消费组，来进行后面的 re-balance 操作，
      * 所以这里需要等待一会，主消费者的 JOIN GROUP 请求的返回的响应会把这段时间所有加入的消费组的消费者返回给消费者客户端，主消费者收到响应后
      * 会进行分区分配，然后再将分区分配的结果同步给服务端。
-     * 所以，在第一个消费者（主消费者）加入消费组时，这里会创建一个 InitialDelayedJoin 延迟操作，这个延迟操作的 tryComplete 方法返回 false。
+     * 所以，在第一个消费者（主消费者）加入消费组时，这里会创建一个 [[InitialDelayedJoin]] 延迟操作，这个延迟操作的 tryComplete 方法返回 false。
      * 默认超时时间是 3s，当达到超时时间后，延迟操作会被强制完成执行，并执行其 onComplete 方法。
      * 具体的执行流程：
      * 这个延迟操作会被放到时间轮（timeWheel）中的延迟队列中，在 DelayedOperationPurgatory 中会有一个后台线程 ExpiredOperationReaper，
@@ -1337,6 +1353,18 @@ class GroupCoordinator(val brokerId: Int,
     // TODO: add metrics for restabilize timeouts
   }
 
+  /**
+   * 延迟操作完成分两种情况：
+   *  1. 正常完成，由外部事件触发，此时消费组里的所有消费者都已经发送了 "加入消费组" 请求。
+   *  2. 超时完成，延迟操作等待最大超时时间后，还不能完成，可能是有些消费由于网络等原因迟迟没有发送 "加入消费组" 请求，
+   * 此时延迟操作被强制完成，在强制完成过程中，会从消费组里移除那些还没有发送 "加入消费组" 请求的消费者，并停止它们的心跳。
+   *
+   * 判断没有发送 "加入消费组" 请求的条件，消费者元数据中等待加入的回调函数为空，消费者加入消费组时，会将回调函数保存到
+   * [[kafka.coordinator.group.MemberMetadata.awaitingJoinCallback]] 消费者元数据的这个字段中。
+   *
+   * 这个方法可能由消费组首次从 Empty 状态执行再平衡操作，也可能是在非首次执行再平衡操作，上述表述的是第二种场景。首次执行再平衡
+   * 延迟操作是由超时触发的。
+   */
   def onCompleteJoin(group: GroupMetadata): Unit = {
     group.inLock {
       val notYetRejoinedDynamicMembers = group.notYetRejoinedMembers.filterNot(_._2.isStaticMember)
@@ -1344,6 +1372,8 @@ class GroupCoordinator(val brokerId: Int,
         info(s"Group ${group.groupId} remove dynamic members " +
           s"who haven't joined: ${notYetRejoinedDynamicMembers.keySet}")
 
+        // 从消费组中移除还没有发送 "加入消费组" 的请求
+        // 停止心跳检测
         notYetRejoinedDynamicMembers.values foreach { failedMember =>
           removeHeartbeatForLeavingMember(group, failedMember)
           group.remove(failedMember.memberId)
@@ -1401,6 +1431,7 @@ class GroupCoordinator(val brokerId: Int,
             group.maybeInvokeJoinCallback(member, joinResult)
             // 执行延迟心跳 todo huangran 这里执行延迟心跳完成了什么动作
             completeAndScheduleNextHeartbeatExpiration(group, member)
+            // 执行完心跳后，将 isNew 设置为 false，后续判断心跳是否可以完成就不会进入 isNew 的分支了
             member.isNew = false
           }
         }
@@ -1439,6 +1470,7 @@ class GroupCoordinator(val brokerId: Int,
     }
   }
 
+  // 心跳超时逻辑
   def onExpireHeartbeat(group: GroupMetadata, memberId: String, isPending: Boolean): Unit = {
     group.inLock {
       if (group.is(Dead)) {
@@ -1450,6 +1482,9 @@ class GroupCoordinator(val brokerId: Int,
         debug(s"Member $memberId has already been removed from the group.")
       } else {
         val member = group.get(memberId)
+        // 这个条件表示，如果消费者还存活，虽然发生了超时，但是也不会把它从消费组中移除。
+        // 1. awaitingJoinCallback != null，表示消费这发送了 "加入消费组" 的请求，协调者正在处理这个 "加入消费组" 的请求
+        // 2. awaitingSyncCallback != null，消费这发送了 "同步消费组" 的请求，协调者正在处理这个 "同步消费组" 的请求
         if (!member.hasSatisfiedHeartbeat) {
           info(s"Member ${member.memberId} in group ${group.groupId} has failed, removing it from the group")
           removeMemberAndUpdateGroup(group, member, s"removing member ${member.memberId} on heartbeat expiration")
