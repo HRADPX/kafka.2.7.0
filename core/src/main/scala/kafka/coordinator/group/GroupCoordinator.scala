@@ -1017,20 +1017,33 @@ class GroupCoordinator(val brokerId: Int,
 
   /**
    * Complete existing DelayedHeartbeats for the given member and schedule the next one
-   * 这里心跳的超时时间是消费者级别的，而不是消费组级别
+   * 这里心跳的超时时间是消费者级别的，而不是消费组级别。
+   *
+   * 考虑下面这个场景，如果消费组完成了所有消费者的加入请求并执行了所有消费者的加入回调（这个过程同样会完成所有消费者的延迟心跳并调度一下心跳），
+   * 此时消费组状态为 CompletingRebalance，消费组在等待所有消费者发送 "同步消费组" 的请求，如果在等待过程中，某个消费者掉线无法发送请求，
+   * 这个消费者的延迟心跳会超时，在执行超时方法里，在将这个消费者从消费组中剔除前，会判断当前消费者是否在加入/同步阶段，依据是加入/同步回调函
+   * 数是否有不为空，但是由于消费组已经返回加入响应（加入回调函数为空），当前消费者还没有发送 "同步消费组" 的请求（同步回调函数为空），所以
+   * 消费组会认为这个消费者已经掉线，会从消费组中移除。
+   *
+   * 再考虑另一个场景，如果消费组状态也是 CompletingRebalance，当前消费者也已经发送了 "同步消费组" 的请求（同步回调函数不为空），但是由于
+   * 等待同步阶段，心跳是消费者级别，如果当前消费者的超时时间比较短（3s），而主消费者和其他消费者的超时时间较长（10s），那么在该消费者心跳
+   * 超时之前主消费者还没有发送 "同步消费组" 的请求，那么在心跳超时的操作中，在移除当前消费者之前看到加入回调不为空，消费者知道消费者还存活，所以
+   * 不会将它从消费组中移除。
    */
   private def completeAndScheduleNextHeartbeatExpiration(group: GroupMetadata, member: MemberMetadata): Unit = {
     completeAndScheduleNextExpiration(group, member, member.sessionTimeoutMs)
   }
 
   /**
-   * todo huangran 补充可以完成的其他场景
-   * 完成本次心跳，并调度下一次心跳
+   * 完成本次心跳，并调度下一次心跳，如果能完成，从延迟缓存中将其移除，并创建下一次的心跳保存到延迟缓存中。
    * 判断延迟心跳是否能够完成（tryComplete()）的条件：
-   *  1. 如果是新的消费者（第一次加入消费组，并且 "加入消费组" 的响应还没有返回给消费者），根据 [[MemberMetadata.heartbeatSatisfied]]
-   *  的值判断是否可以完成。
+   *  1. 如果是新的消费者（第一次加入消费组，并且 "加入消费组" 的响应还没有返回给消费者，isNew = true），
+   *  根据 [[MemberMetadata.heartbeatSatisfied]]的值判断是否可以完成。
    *  2. 消费者元数据里的加入回调或同步回调不为空。
+   *  3. 消费者是否离开了消费组（这里为什么要执行心跳）
    *  3. 其他情况看 [[MemberMetadata.heartbeatSatisfied]] 的值
+   *
+   * 对于一个消费者而言，任何时候，延迟缓存中只会有一个延迟心跳与之对应。
    */
   private def completeAndScheduleNextExpiration(group: GroupMetadata, member: MemberMetadata, timeoutMs: Long): Unit = {
     val memberKey = MemberKey(member.groupId, member.memberId)
@@ -1105,7 +1118,13 @@ class GroupCoordinator(val brokerId: Int,
     // 延迟心跳，用户检测会话超时，在 re-balance 时会停止心跳
     // 如果客户端确实断开连接（例如，由于长时间重新平衡期间的请求超时），他们可能会简单地重试，这将导致重新平衡中有很多已失效的成员。
     // 为防止这种情况无限期地发生，会暂停对新成员的 JoinGroup 请求。 如果新成员仍然存在，则让它重试。
-    // 正常逻辑加入逻辑这里是消费者第一次创建延迟心跳，但是因为缓存中还没有这个消费者的延迟心跳，所以第一次不会真正执行该方法的。
+    // 正常逻辑加入逻辑这里是消费者第一次创建延迟心跳，但是因为缓存中还没有这个消费者的延迟心跳来让它执行，所以第一次只是创建一个延迟心跳并保存
+    // 到延迟缓存中。
+    // ------------------------------------- 下面为消费者非首次加入消费组的场景 -------------------------------------
+    // 在消费组再平衡的场景下，如果消费者再次加入消费组，此时的延迟缓存里延迟心跳就不为空，这是就可以完成并调度下一次心跳。
+    // 考虑一种异常的情况，如果在消费者再平衡时，如果某个消费者长时间没有发送 "加入消费组" 的请求，这时延迟缓存中该消费者的心跳就可能超时，
+    // 在超时方法里会判断是否还在加入/同步消费组的阶段，依据是消费者元数据里的加入/同步回调函数是否为空，由于是非首次加入消费组，并且该消费
+    // 者还没有完成发送 "加入消费组" 的请求，所以这时发生超时，会将这个消费者从消费组里移除。
     completeAndScheduleNextExpiration(group, member, NewMemberJoinTimeoutMs)  // 300s
 
     if (member.isStaticMember) {
@@ -1429,7 +1448,7 @@ class GroupCoordinator(val brokerId: Int,
 
             // 执行回调
             group.maybeInvokeJoinCallback(member, joinResult)
-            // 执行延迟心跳 todo huangran 这里执行延迟心跳完成了什么动作
+            // 执行延迟心跳，实际上是完成延迟缓存中上次创建的心跳，并创建下次调度的心跳任务存到延迟缓存中
             completeAndScheduleNextHeartbeatExpiration(group, member)
             // 执行完心跳后，将 isNew 设置为 false，后续判断心跳是否可以完成就不会进入 isNew 的分支了
             member.isNew = false
@@ -1482,7 +1501,7 @@ class GroupCoordinator(val brokerId: Int,
         debug(s"Member $memberId has already been removed from the group.")
       } else {
         val member = group.get(memberId)
-        // 这个条件表示，如果消费者还存活，虽然发生了超时，但是也不会把它从消费组中移除。
+        // 这个条件表示，如果消费者还存活，虽然发生了超时，协调者也不会把它从消费组中移除。
         // 1. awaitingJoinCallback != null，表示消费这发送了 "加入消费组" 的请求，协调者正在处理这个 "加入消费组" 的请求
         // 2. awaitingSyncCallback != null，消费这发送了 "同步消费组" 的请求，协调者正在处理这个 "同步消费组" 的请求
         if (!member.hasSatisfiedHeartbeat) {

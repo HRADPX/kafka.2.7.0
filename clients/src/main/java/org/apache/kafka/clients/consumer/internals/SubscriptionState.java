@@ -16,6 +16,24 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.LongSupplier;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
+
 import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.NodeApiVersions;
@@ -29,13 +47,6 @@ import org.apache.kafka.common.internals.PartitionStates;
 import org.apache.kafka.common.requests.EpochEndOffset;
 import org.apache.kafka.common.utils.LogContext;
 import org.slf4j.Logger;
-
-import java.util.*;
-import java.util.function.LongSupplier;
-import java.util.function.Predicate;
-import java.util.regex.Pattern;
-
-import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
 
 /**
  * A class for tracking the topics, partitions, and offsets for the consumer. A partition
@@ -263,6 +274,7 @@ public class SubscriptionState {
     /**
      * Change the assignment to the specified partitions returned from the coordinator, note this is
      * different from {@link #assignFromUser(Set)} which directly set the assignment from user inputs.
+     * 保存从协调者返回的分配给该消费者的分区列表
      */
     public synchronized void assignFromSubscribed(Collection<TopicPartition> assignments) {
         if (!this.hasAutoAssignedPartitions())
@@ -277,6 +289,7 @@ public class SubscriptionState {
         }
 
         assignmentId++;
+        // 清空原先的分配的分区并保存这次新分配的分区
         this.assignment.set(assignedPartitionStates);
     }
 
