@@ -1184,6 +1184,7 @@ class Partition(val topicPartition: TopicPartition,
     val localLog = localLogWithEpochOrException(currentLeaderEpoch, fetchOnlyFromLeader)
 
     val lastFetchableOffset = isolationLevel match {
+        // 根据不同的隔离级别返回不同的偏移量
       case Some(IsolationLevel.READ_COMMITTED) => localLog.lastStableOffset
       case Some(IsolationLevel.READ_UNCOMMITTED) => localLog.highWatermark
       case None => localLog.logEndOffset

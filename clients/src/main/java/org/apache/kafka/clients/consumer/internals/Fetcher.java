@@ -435,6 +435,7 @@ public class Fetcher<K, V> implements Closeable {
 
         final Map<TopicPartition, Long> offsetResetTimestamps = new HashMap<>();
         for (final TopicPartition partition : partitions) {
+            // 默认的分区重置策略为 EARLIEST
             Long timestamp = offsetResetStrategyTimestamp(partition);
             if (timestamp != null)
                 offsetResetTimestamps.put(partition, timestamp);
@@ -711,10 +712,11 @@ public class Fetcher<K, V> implements Closeable {
     }
 
     private void resetOffsetsAsync(Map<TopicPartition, Long> partitionResetTimestamps) {
-        // 按节点进行合并
+        // 按节点进行合并，这次发送请求的目标节点不是协调者了，而是各个分区的主副本节点，因为协调者上没有这些分区的偏移量信息
         Map<Node, Map<TopicPartition, ListOffsetPartition>> timestampsToSearchByNode =
                 groupListOffsetRequests(partitionResetTimestamps, new HashSet<>());
 
+        // 遍历目标节点，依次发送请求，原因见上
         for (Map.Entry<Node, Map<TopicPartition, ListOffsetPartition>> entry : timestampsToSearchByNode.entrySet()) {
             Node node = entry.getKey();
             final Map<TopicPartition, ListOffsetPartition> resetTimestamps = entry.getValue();
@@ -725,6 +727,7 @@ public class Fetcher<K, V> implements Closeable {
                 @Override
                 public void onSuccess(ListOffsetResult result) {
                     if (!result.partitionsToRetry.isEmpty()) {
+                        // 设置重试..
                         subscriptions.requestFailed(result.partitionsToRetry, time.milliseconds() + retryBackoffMs);
                         metadata.requestUpdate();
                     }
@@ -732,6 +735,7 @@ public class Fetcher<K, V> implements Closeable {
                     // 这里最终也是调用 TopicPartitionState.seekUnvalidated 方法设置分区的拉取偏移量
                     for (Map.Entry<TopicPartition, ListOffsetData> fetchedOffset : result.fetchedOffsets.entrySet()) {
                         TopicPartition partition = fetchedOffset.getKey();
+                        // 从主副本节点返回的偏移量
                         ListOffsetData offsetData = fetchedOffset.getValue();
                         ListOffsetPartition requestedReset = resetTimestamps.get(partition);
                         resetOffsetIfNeeded(partition, timestampToOffsetResetStrategy(requestedReset.timestamp()), offsetData);
@@ -917,6 +921,7 @@ public class Fetcher<K, V> implements Closeable {
         final Map<TopicPartition, ListOffsetPartition> partitionDataMap = new HashMap<>();
         for (Map.Entry<TopicPartition, Long> entry: timestampsToSearch.entrySet()) {
             TopicPartition tp  = entry.getKey();
+            // 分区重置策略
             Long offset = entry.getValue();
             Metadata.LeaderAndEpoch leaderAndEpoch = metadata.currentLeader(tp);
 
@@ -925,6 +930,7 @@ public class Fetcher<K, V> implements Closeable {
                 metadata.requestUpdate();
                 partitionsToRetry.add(tp);
             } else {
+                // 连接状态判断
                 Node leader = leaderAndEpoch.leader.get();
                 if (client.isUnavailable(leader)) {
                     client.maybeThrowAuthFailure(leader);
@@ -997,6 +1003,7 @@ public class Fetcher<K, V> implements Closeable {
                 Errors error = Errors.forCode(partition.errorCode());
                 switch (error) {
                     case NONE:
+                        // 去服务端看看什么情况下 oldStyleOffsets 不为空
                         if (!partition.oldStyleOffsets().isEmpty()) {
                             // Handle v0 response with offsets
                             long offset;
@@ -1086,6 +1093,8 @@ public class Fetcher<K, V> implements Closeable {
      */
     private List<TopicPartition> fetchablePartitions() {
         Set<TopicPartition> exclude = new HashSet<>();
+        // 这个条件表示上次这个分区拉取的消费客户端还没有消费完成，这次拉取需要将这个分区排除
+        // 只有分区拉取的消息都被消费了，才会进行下一次拉取
         if (nextInLineFetch != null && !nextInLineFetch.isConsumed) {
             exclude.add(nextInLineFetch.partition);
         }

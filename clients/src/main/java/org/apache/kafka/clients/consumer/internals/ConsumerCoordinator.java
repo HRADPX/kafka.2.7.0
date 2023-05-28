@@ -16,48 +16,17 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
-
 import org.apache.kafka.clients.GroupRebalanceConfig;
-import org.apache.kafka.clients.consumer.CommitFailedException;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
-import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor;
+import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.Assignment;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.GroupSubscription;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.RebalanceProtocol;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.Subscription;
-import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.clients.consumer.OffsetCommitCallback;
-import org.apache.kafka.clients.consumer.RetriableCommitFailedException;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.FencedInstanceIdException;
-import org.apache.kafka.common.errors.GroupAuthorizationException;
-import org.apache.kafka.common.errors.InterruptException;
-import org.apache.kafka.common.errors.RebalanceInProgressException;
-import org.apache.kafka.common.errors.RetriableException;
-import org.apache.kafka.common.errors.TimeoutException;
-import org.apache.kafka.common.errors.TopicAuthorizationException;
-import org.apache.kafka.common.errors.UnstableOffsetCommitException;
-import org.apache.kafka.common.errors.WakeupException;
+import org.apache.kafka.common.errors.*;
 import org.apache.kafka.common.message.JoinGroupRequestData;
 import org.apache.kafka.common.message.JoinGroupResponseData;
 import org.apache.kafka.common.message.OffsetCommitRequestData;
@@ -70,16 +39,20 @@ import org.apache.kafka.common.metrics.stats.Max;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.RecordBatch;
-import org.apache.kafka.common.requests.JoinGroupRequest;
-import org.apache.kafka.common.requests.OffsetCommitRequest;
-import org.apache.kafka.common.requests.OffsetCommitResponse;
-import org.apache.kafka.common.requests.OffsetFetchRequest;
-import org.apache.kafka.common.requests.OffsetFetchResponse;
+import org.apache.kafka.common.requests.*;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
+
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 /**
  * This class manages the coordination process with the consumer coordinator.
@@ -858,26 +831,30 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         // 发送获取偏移量请求（OFFSET_FETCH) 给服务端的协调者节点
         final Map<TopicPartition, OffsetAndMetadata> offsets = fetchCommittedOffsets(initializingPartitions, timer);
+        // 如果获取偏移量请求失败了，offsets = null，这里返回了 false， 上层也是直接返回了 false，但是后续如何处理？ todo huangran
         if (offsets == null) return false;
 
+        // 请求成功
         for (final Map.Entry<TopicPartition, OffsetAndMetadata> entry : offsets.entrySet()) {
             final TopicPartition tp = entry.getKey();
             final OffsetAndMetadata offsetAndMetadata = entry.getValue();
             // 如果没有已提交的偏移量，返回的就是 null，比如消费者都是首次启动或新增加了一些分区，
             // 这些场景下分区没有被消费过自然也不会有消费者提交偏移量
+            // 如果当前分区之前没有提交过偏移量，返回的是 null，这里没有处理，而是在后续使用默认的分配策略执行
             if (offsetAndMetadata != null) {
                 // first update the epoch if necessary
                 entry.getValue().leaderEpoch().ifPresent(epoch -> this.metadata.updateLastSeenEpochIfNewer(entry.getKey(), epoch));
 
                 // it's possible that the partition is no longer assigned when the response is received,
                 // so we need to ignore seeking if that's the case
+                // 判断下当前消费者是否还持有该分区，因为可能在收到响应前，消费者已经不持有分区了
                 if (this.subscriptions.isAssigned(tp)) {
                     final ConsumerMetadata.LeaderAndEpoch leaderAndEpoch = metadata.currentLeader(tp);
                     final SubscriptionState.FetchPosition position = new SubscriptionState.FetchPosition(
                             offsetAndMetadata.offset(), offsetAndMetadata.leaderEpoch(),
                             leaderAndEpoch);
 
-                    // 协调节点保存的数据更新到客户端
+                    // 协调节点保存的偏移量信息保存到消费者，这样消费者就可以拉取消息了
                     this.subscriptions.seekUnvalidated(tp, position);
 
                     log.info("Setting offset for partition {} to the committed offset {}", tp, position);
@@ -895,12 +872,18 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
      *
      * @param partitions The partitions to fetch offsets for
      * @return A map from partition to the committed offset or null if the operation timed out
+     *
+     * 这个方法返回 null 的几种场景：
+     * 1.协调者不存在
+     * 2.超时
+     * 3.不可重试的异常
      */
     public Map<TopicPartition, OffsetAndMetadata> fetchCommittedOffsets(final Set<TopicPartition> partitions,
                                                                         final Timer timer) {
         if (partitions.isEmpty()) return Collections.emptyMap();
 
         final Generation generationForOffsetRequest = generationIfStable();
+        // 这个变量用于记录两次发送的请求是否是一样的，如果是一样就不必要重复发送了
         if (pendingCommittedOffsetRequest != null &&
             !pendingCommittedOffsetRequest.sameRequest(partitions, generationForOffsetRequest)) {
             // if we were waiting for a different request, then just clear it.
@@ -908,6 +891,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
         }
 
         do {
+            // 判断协调者是否存活
             if (!ensureCoordinatorReady(timer)) return null;
 
             // contact coordinator to fetch committed offsets
@@ -917,12 +901,14 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
             } else {
                 // 将请求放到 unsent 数据结构中，会在下面的 poll 方法中执行网络请求
                 future = sendOffsetFetchRequest(partitions);
+                // 记录下这次发送的请求
                 pendingCommittedOffsetRequest = new PendingCommittedOffsetRequest(partitions, generationForOffsetRequest, future);
             }
             // 发送请求
             client.poll(future, timer);
 
             if (future.isDone()) {
+                // 请求完成，清除历史请求
                 pendingCommittedOffsetRequest = null;
 
                 if (future.succeeded()) {
@@ -1445,7 +1431,8 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 } else if (partitionData.offset >= 0) {
                     // record the position with the offset (-1 indicates no committed offset to fetch);
                     // if there's no committed offset, record as null
-                    // 保存分区和对应的已提交的 offset
+                    // 保存分区和对应的已提交的 offset，如果 offset = -1，表示这个分区之前没有提交过偏移量，如消费组首次启动，
+                    // 这种情况走下面的分支，用 null 记录。
                     offsets.put(tp, new OffsetAndMetadata(partitionData.offset, partitionData.leaderEpoch, partitionData.metadata));
                 } else {
                     // 没有返回null
@@ -1465,6 +1452,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                              "normal offsets waiting for replication after appending to local log", unstableTxnOffsetTopicPartitions);
                 future.raise(new UnstableOffsetCommitException("There are unstable offsets for the requested topic partitions"));
             } else {
+                // 完成
                 future.complete(offsets);
             }
         }

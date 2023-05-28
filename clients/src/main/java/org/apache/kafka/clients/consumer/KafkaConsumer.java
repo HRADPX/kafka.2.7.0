@@ -1238,7 +1238,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
                 if (includeMetadataInTimeout) {
                     // try to update assignment metadata BUT do not need to block on the timer for join group
-                    // 更新元数据、加入用户组、执行再平衡等操作
+                    // 更新元数据、加入用户组、执行再平衡等操作，这个方法返回后，消费者拉取消息的所有准备都完成了（包括加入消费组、
+                    // 获取分配的分区，获取拉取偏移量）
                     updateAssignmentMetadataIfNeeded(timer, false);
                 } else {
                     while (!updateAssignmentMetadataIfNeeded(time.timer(Long.MAX_VALUE), true)) {
@@ -1277,7 +1278,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
             return false;
         }
 
-        // 更新 offset
+        // 更新拉取偏移量，只有消费者持有的分区状态中有合法的拉取偏移量后才能开始真正的拉取消息
         return updateFetchPositions(timer);
     }
 
@@ -2425,11 +2426,28 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @throws NoOffsetForPartitionException If no offset is stored for a given partition and no offset reset policy is
      *             defined
      * @return true iff the operation completed without timing out
+     *
+     * 1.消费组首次启动，消费者完成加入和同步消费组后，服务端返回分配的分区给各个消费者，消费者保存分区并为每个分区初始化一个分区状态，
+     * 记录偏移量和纪元信息。
+     * 2.在从服务端拉取消息之前，消费者会更新偏移量（如果需要），消费者会将其持有的分区发送给协调者，协调者会将之前这些分区提交的偏移量
+     * 信息返回，消费者根据协调者返回的信息更新分区状态，如果获取到了之前的偏移量信息，则更新分区状态为可拉取状态（FETCHING），
+     * 表示可以从服务端拉取消息了。但是如果是首次启动或者是一个新的分区，协调者也没有保存之前的偏移量信息，这时返回 null。
+     * 3.消费者会把步骤 2 中没有获取到偏移量的分区使用默认的分区策略来 reset position，并把分区状态从 INITIALIZING -> AWAIT_RESET，
+     * 然后发送一个异步请求处理这些没有拉取到偏移量的分区。需要注意的是，这次发送的请求不是发送给协调者，而是发送给各个分区的主副本节点，
+     * 因为上个步骤已经知道协调者上没有这些分区的偏移量信息。
+     * 4.服务端根据给定的分区重置策略返回对应的偏移量，在收到响应后会根据这些偏移量更新分区状态 INITIALIZING -> FETCHING
+     *
+     * Note: 步骤 3 是异步请求，所以如果消费者开始拉取消息时，可能这些请求还没有完成。
+     *
+     * todo
+     *  1.上面的流程默认忽略了 AWAIT_VALIDATION 这个状态，因为是从消费者启动这个流程开始，暂时不需要考虑这个状态，后续分析
+     *  2.
      */
     private boolean updateFetchPositions(final Timer timer) {
         // If any partitions have been truncated due to a leader change, we need to validate the offsets
         fetcher.validateOffsetsIfNeeded();
 
+        // 判断消费者所有的分区是否有可拉取的偏移量，如果都有了，表示消费者就绪可以从服务端拉取消息了，直接返回
         cachedSubscriptionHashAllFetchPositions = subscriptions.hasAllFetchPositions();
         if (cachedSubscriptionHashAllFetchPositions) return true;
 
@@ -2438,6 +2456,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         // coordinator lookup if there are partitions which have missing positions, so
         // a consumer with manually assigned partitions can avoid a coordinator dependence
         // by always ensuring that assigned partitions have an initial position.
+        // 如果是消费组首次启动
         // 存在有些分区没有有效的拉取偏移量（分区状态为 INITIALIZING）
         if (coordinator != null && !coordinator.refreshCommittedOffsetsIfNeeded(timer)) return false;
 

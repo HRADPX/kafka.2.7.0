@@ -150,6 +150,9 @@ queued.max_requests: 控制 RequestChannel 队列的容量，表示在网络线�
 
 todo huangran
 再平衡过程中，消费者客户端是否会停止心跳？如果没有停止心跳，消费者客户端如何处理心跳的响应？
+服务端拉取消息流程
+服务端处理 OFFSET_FETCH 和 LIST_OFFSET 流程
+为什么Kafka消费者不循环实现获取消息的逻辑，而是让消费者客户端来轮询
 
 
 

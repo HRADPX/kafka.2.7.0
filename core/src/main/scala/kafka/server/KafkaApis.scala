@@ -138,6 +138,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         case ApiKeys.PRODUCE => handleProduceRequest(request)
         // follower 拉取数据同步
         case ApiKeys.FETCH => handleFetchRequest(request)
+        // 获取偏移量请求
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
         case ApiKeys.LEADER_AND_ISR => handleLeaderAndIsrRequest(request)
@@ -1076,6 +1077,7 @@ class KafkaApis(val requestChannel: RequestChannel,
             else
               None
 
+            // 执行逻辑
             val foundOpt = replicaManager.fetchOffsetForTimestamp(topicPartition,
               partition.timestamp,
               isolationLevelOpt,

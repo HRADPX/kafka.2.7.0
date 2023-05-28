@@ -16,24 +16,6 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
-import java.util.function.LongSupplier;
-import java.util.function.Predicate;
-import java.util.regex.Pattern;
-
 import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.NodeApiVersions;
@@ -47,6 +29,13 @@ import org.apache.kafka.common.internals.PartitionStates;
 import org.apache.kafka.common.requests.EpochEndOffset;
 import org.apache.kafka.common.utils.LogContext;
 import org.slf4j.Logger;
+
+import java.util.*;
+import java.util.function.LongSupplier;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
+
+import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
 
 /**
  * A class for tracking the topics, partitions, and offsets for the consumer. A partition
@@ -131,6 +120,10 @@ public class SubscriptionState {
         }
     }
 
+    /**
+     * 默认分区重置策略 {@link OffsetResetStrategy#EARLIEST}
+     * @see org.apache.kafka.clients.consumer.ConsumerConfig#AUTO_OFFSET_RESET_CONFIG
+     */
     public SubscriptionState(LogContext logContext, OffsetResetStrategy defaultResetStrategy) {
         this.log = logContext.logger(this.getClass());
         this.defaultResetStrategy = defaultResetStrategy;
@@ -274,7 +267,9 @@ public class SubscriptionState {
     /**
      * Change the assignment to the specified partitions returned from the coordinator, note this is
      * different from {@link #assignFromUser(Set)} which directly set the assignment from user inputs.
-     * 保存从协调者返回的分配给该消费者的分区列表
+     * 保存从协调者返回的分配给该消费者的分区列表，这个方法会在消费者完成加入和同步消费组后调用
+     * 如果是消费组首次启动，TopicPartitionState 里的拉取状态是初始化状态，此时还不能直接拉取消息，需要更新拉取偏移
+     * 量后才能开始从服务端拉取消息。
      */
     public synchronized void assignFromSubscribed(Collection<TopicPartition> assignments) {
         if (!this.hasAutoAssignedPartitions())
@@ -707,6 +702,10 @@ public class SubscriptionState {
             throw new NoOffsetForPartitionException(partitionsWithNoOffsets);
     }
 
+    /**
+     * 获取需要重置和重试的分区。
+     * 更新拉取偏移量成功后，会将分区状态的 nextRetryTimeMs 设置为 null，表示无需重试。
+     */
     public synchronized Set<TopicPartition> partitionsNeedingReset(long nowMs) {
         return collectPartitions(state -> state.awaitingReset() && !state.awaitingRetryBackoff(nowMs));
     }
@@ -748,6 +747,7 @@ public class SubscriptionState {
             // contain this partition any more, in which case we would just ignore.
             final TopicPartitionState state = assignedStateOrNull(partition);
             if (state != null)
+                // 设置重试
                 state.requestFailed(nextRetryTimeMs);
         }
     }
@@ -792,6 +792,7 @@ public class SubscriptionState {
         private void transitionState(FetchState newState, Runnable runIfTransitioned) {
             FetchState nextState = this.fetchState.transitionTo(newState);
             if (nextState.equals(newState)) {
+                // 更新状态
                 this.fetchState = nextState;
                 runIfTransitioned.run();
                 if (this.position == null && nextState.requiresPosition()) {
@@ -929,18 +930,22 @@ public class SubscriptionState {
         }
 
         private void seekValidated(FetchPosition position) {
+            // 将拉取状态更新为可拉取
             transitionState(FetchStates.FETCHING, () -> {
+                // 更新拉取偏移量
                 this.position = position;
                 this.resetStrategy = null;
                 this.nextRetryTimeMs = null;
             });
         }
 
+        // 更新拉取信息
         private void seekUnvalidated(FetchPosition fetchPosition) {
             seekValidated(fetchPosition);
             validatePosition(fetchPosition);
         }
 
+        // 更新拉取偏移量
         private void position(FetchPosition position) {
             if (!hasValidPosition())
                 throw new IllegalStateException("Cannot set a new position without a valid current position");
@@ -963,6 +968,7 @@ public class SubscriptionState {
             this.paused = false;
         }
 
+        // 是否可以拉取消息（没有暂停并且 position 有效才能拉取）
         private boolean isFetchable() {
             return !paused && hasValidPosition();
         }
