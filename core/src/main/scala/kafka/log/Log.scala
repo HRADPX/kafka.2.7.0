@@ -290,6 +290,7 @@ class Log(@volatile private var _dir: File,
   @volatile private var highWatermarkMetadata: LogOffsetMetadata = LogOffsetMetadata(logStartOffset)
 
   /* the actual segments of the log */
+  // 日志包含多个日志分段
   private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
 
   // Visible for testing
@@ -1112,6 +1113,7 @@ class Log(@volatile private var _dir: File,
           // assign offsets to the message set
           // 2) 分配 offset
           val offset = new LongRef(nextOffsetMetadata.messageOffset)
+          // 更新偏移量
           appendInfo.firstOffset = Some(offset.value)
           val now = time.milliseconds
           val validateAndOffsetAssignResult = try {
@@ -1888,6 +1890,9 @@ class Log(@volatile private var _dir: File,
    * <li> The index is full
    * </ol>
    * @return The currently active segment after (perhaps) rolling to a new segment
+   *
+   * 一个分区对应一个目录，目录下包含多个数据文件，一个数据对应一个 Segment，每个文件达到 1GB 后会建一个新的数据文件。
+   * 一般来说每次写文件都是写入最后一个文件中。
    */
   private def maybeRoll(messagesSize: Int, appendInfo: LogAppendInfo): LogSegment = {
     // 获取当前最新的 segment
@@ -1897,6 +1902,7 @@ class Log(@volatile private var _dir: File,
     val maxTimestampInMessages = appendInfo.maxTimestamp
     val maxOffsetInMessages = appendInfo.lastOffset
 
+    // 如果分区首次写入消息或最后一个数据文件已经达到容量上限，是否需要新建一个 Segment（数据文件），
     if (segment.shouldRoll(RollParams(config, appendInfo, messagesSize, now))) {
       debug(s"Rolling new log segment (log_size = ${segment.size}/${config.segmentSize}}, " +
         s"offset_index_size = ${segment.offsetIndex.entries}/${segment.offsetIndex.maxEntries}, " +
@@ -2677,6 +2683,8 @@ object Log {
 
   /**
    * Parse the topic and partition out of the directory name of a log
+   * 一个日志的目录对应一个分区
+   * 可以从分区的目录中解析出对应分区的分区对象（TopicAndParition）
    */
   def parseTopicPartitionName(dir: File): TopicPartition = {
     if (dir == null)

@@ -16,10 +16,10 @@
  */
 package org.apache.kafka.common.record;
 
-import org.apache.kafka.common.utils.CloseableIterator;
-
 import java.nio.ByteBuffer;
 import java.util.Iterator;
+
+import org.apache.kafka.common.utils.CloseableIterator;
 
 /**
  * A record batch is a container for records. In old versions of the record format (versions 0 and 1),
@@ -109,6 +109,9 @@ public interface RecordBatch extends Iterable<Record> {
      *
      * @return The base offset of this record batch (which may or may not be the offset of the first record
      *         as described above).
+     * 获取记录批的 baseOffset
+     * 在 magic 小于 2 之前，这个值是当前记录批的第一条消息，这通常需要深度遍历。在 magic 在 2 及其以后版本，可以直接从消息头
+     * 中获取（未压缩前）。
      */
     long baseOffset();
 

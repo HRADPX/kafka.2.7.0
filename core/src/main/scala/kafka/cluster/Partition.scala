@@ -253,8 +253,11 @@ case class CommittedIsr(
  *    locking order Partition lock -> Log lock.
  * 5) lock is used to prevent the follower replica from being updated while ReplicaAlterDirThread is
  *    executing maybeReplaceCurrentWithFutureReplica() to replace follower replica with the future replica.
+ *
+ * AR(Assigned Replica): 分区的所有副本
+ * ISR(In-Sync-Replica): 和主副本处于同步的所有副本
  */
-class Partition(val topicPartition: TopicPartition,
+class Partition(val topicPartition: TopicPartition,                   // 分区
                 val replicaLagTimeMaxMs: Long,
                 interBrokerProtocolVersion: ApiVersion,
                 localBrokerId: Int,

@@ -52,6 +52,7 @@ import scala.math._
  * @param rollJitterMs The maximum random jitter subtracted from the scheduled segment roll time
  * @param time The time instance
  */
+// 日志分段，由数据文件和索引文件组成
 @nonthreadsafe
 class LogSegment private[log] (val log: FileRecords,
                                val lazyOffsetIndex: LazyIndex[OffsetIndex],
@@ -62,11 +63,15 @@ class LogSegment private[log] (val log: FileRecords,
                                val rollJitterMs: Long,
                                val time: Time) extends Logging {
 
+  // 索引
   def offsetIndex: OffsetIndex = lazyOffsetIndex.get
 
   def timeIndex: TimeIndex = lazyTimeIndex.get
 
   // 判断是否需要创建一个新的 segment
+  // 1. 当前数据文件大小 + 要写入数据大小超过数据文件的最大容量（1GB)
+  // 2. 每隔一段时间，自动创建一个新的数据文件
+  // 3. 偏移量索引已满，时间索引已满
   def shouldRoll(rollParams: RollParams): Boolean = {
     val reachedRollMs = timeWaitedForRoll(rollParams.now, rollParams.maxTimestampInMessages) > rollParams.maxSegmentMs - rollJitterMs
     // Kafka 默认一个 segment 大小是 1G，如果当前的 segment 大小再加上写入进去的数据大小超过 1G，就会新创建一个 segment

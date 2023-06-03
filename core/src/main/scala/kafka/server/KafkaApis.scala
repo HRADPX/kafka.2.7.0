@@ -640,6 +640,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     if (authorizedRequestInfo.isEmpty)
       sendResponseCallback(Map.empty)
     else {
+      // false
       val internalTopicsAllowed = request.header.clientId == AdminUtils.AdminClientId
 
       // call the replica manager to append messages to the replicas
@@ -647,7 +648,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       replicaManager.appendRecords(
         timeout = produceRequest.timeout.toLong,
         requiredAcks = produceRequest.acks,
-        internalTopicsAllowed = internalTopicsAllowed,
+        internalTopicsAllowed = internalTopicsAllowed,    // false
         origin = AppendOrigin.Client,
         entriesPerPartition = authorizedRequestInfo,
         responseCallback = sendResponseCallback,

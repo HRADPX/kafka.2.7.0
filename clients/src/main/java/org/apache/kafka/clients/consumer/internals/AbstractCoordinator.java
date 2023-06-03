@@ -456,7 +456,7 @@ public abstract class AbstractCoordinator implements Closeable {
             if (needsJoinPrepare) {
                 // need to set the flag before calling onJoinPrepare since the user callback may throw
                 // exception, in which case upon retry we should not retry onJoinPrepare either.
-                // 调用 onJoinPrepare 方法的标记，不需要执行两次
+                // 调用 onJoinPrepare 方法的标记，一轮再平衡只需调用一次，后续再平衡完成会重新将这个字段设置为 true
                 needsJoinPrepare = false;
                 onJoinPrepare(generation.generationId, generation.memberId);
             }
@@ -501,6 +501,8 @@ public abstract class AbstractCoordinator implements Closeable {
                     // joinFuture = null 退出循环的条件之一
                     // 另外的条件在同步成功后的 SyncGroupResponseHandler 中设置了 rejoinNeeded = false
                     resetJoinGroupFuture();
+                    // 加入消费组成功，此次再平衡已经结束了，在一次再平衡过程中，加入消费组前的准备工作只会做一次（onJoinPrepare 方法只会
+                    // 调用一次），这里将这个标记设置为 true，让下轮再平衡时再次调用。
                     needsJoinPrepare = true;
                 } else {
                     log.info("Generation data was cleared by heartbeat thread to {} and state is now {} before " +
@@ -546,6 +548,7 @@ public abstract class AbstractCoordinator implements Closeable {
         // we store the join future in case we are woken up by the user after beginning the
         // rebalance in the call to poll below. This ensures that we do not mistakenly attempt
         // to rejoin before the pending rebalance has completed.
+        // 加入成功后，会重置这个变量值为null
         if (joinFuture == null) {
             // 设置状态
             state = MemberState.PREPARING_REBALANCE;
@@ -1469,8 +1472,16 @@ public abstract class AbstractCoordinator implements Closeable {
                         // we do not need to heartbeat we are not part of a group yet;
                         // also if we already have fatal error, the client will be
                         // crashed soon, hence we do not need to continue heartbeating either
-                        // 如果当前消费者还没有加入到消费组或者已经发生错误即将关闭，就不需要发送心跳了
+                        // 1. 首次启动当前消费者还没有加入到消费组，不需要发送心跳。
+                        // 2. 如果消费组之前是平衡状态，但是发生了再平衡，如新的消费者加入，此时心跳请求会返回再平衡异常，在回调中
+                        // 它会将 rejoinNeeded 变量设置为 true，这样消费者在下次轮询时就会重新加入消费组，此时，state 就不再是
+                        // Stable 而是 PREPARING_REBALANCE，所以在再平衡阶段，消费者客户端是停止心跳的。
+                        // 3. 这里有个问题，再平衡阶段，消费者停止上报心跳信息，协调者是如何确认消费者还是存活的呢？在再平衡阶段，服务端也会维护
+                        // 一个延迟的心跳任务，当消费者与协调者有任务交互时（如发送同步请求，返回响应等）时，就会执行一次心跳任务，
+                        // 来保证消费者和协调者的连接状态。如果服务端心跳任务超时，协调者才会认为消费者掉线（超时不一定是掉线的充分条件），
+                        // 将它从消费组中移除。这也是为什么服务端也需要心跳的原因。
                         if (state.hasNotJoinedGroup() || hasFailed()) {
+                            // 再平衡时被 disable，如果消费者加入消费组成功，会重新调用 enable 方法
                             disable();
                             continue;
                         }

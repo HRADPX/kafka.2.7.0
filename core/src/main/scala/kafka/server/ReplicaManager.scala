@@ -956,7 +956,8 @@ class ReplicaManager(val config: KafkaConfig,
       brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()
 
       // reject appending to internal topics if it is not allowed
-      // 如果写入的数据是 Kafka 内部的 topic，提交偏移量等
+      // 判断下是否可以往内部 topic 里写数据，因为 Kafka 将消费偏移量是写到内部的 topic 里。但是生产者
+      // 写入的消息是一般是不允许写到内部 topic 里的。
       if (Topic.isInternal(topicPartition.topic) && !internalTopicsAllowed) {
         // 不允许抛异常
         (topicPartition, LogAppendResult(

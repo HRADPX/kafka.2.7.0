@@ -16,32 +16,72 @@
  */
 package org.apache.kafka.clients.consumer;
 
-import org.apache.kafka.clients.*;
-import org.apache.kafka.clients.consumer.internals.*;
-import org.apache.kafka.common.*;
-import org.apache.kafka.common.errors.InterruptException;
-import org.apache.kafka.common.errors.InvalidGroupIdException;
-import org.apache.kafka.common.errors.TimeoutException;
-import org.apache.kafka.common.internals.ClusterResourceListeners;
-import org.apache.kafka.common.metrics.*;
-import org.apache.kafka.common.network.ChannelBuilder;
-import org.apache.kafka.common.network.Selector;
-import org.apache.kafka.common.requests.MetadataRequest;
-import org.apache.kafka.common.serialization.Deserializer;
-import org.apache.kafka.common.utils.Timer;
-import org.apache.kafka.common.utils.*;
-import org.slf4j.Logger;
+import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapter.getAssignorInstances;
 
 import java.net.InetSocketAddress;
 import java.time.Duration;
-import java.util.*;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.ConcurrentModificationException;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
-import static org.apache.kafka.clients.consumer.internals.PartitionAssignorAdapter.getAssignorInstances;
+import org.apache.kafka.clients.ApiVersions;
+import org.apache.kafka.clients.ClientDnsLookup;
+import org.apache.kafka.clients.ClientUtils;
+import org.apache.kafka.clients.CommonClientConfigs;
+import org.apache.kafka.clients.GroupRebalanceConfig;
+import org.apache.kafka.clients.Metadata;
+import org.apache.kafka.clients.NetworkClient;
+import org.apache.kafka.clients.consumer.internals.ConsumerCoordinator;
+import org.apache.kafka.clients.consumer.internals.ConsumerInterceptors;
+import org.apache.kafka.clients.consumer.internals.ConsumerMetadata;
+import org.apache.kafka.clients.consumer.internals.ConsumerNetworkClient;
+import org.apache.kafka.clients.consumer.internals.Fetcher;
+import org.apache.kafka.clients.consumer.internals.FetcherMetricsRegistry;
+import org.apache.kafka.clients.consumer.internals.KafkaConsumerMetrics;
+import org.apache.kafka.clients.consumer.internals.NoOpConsumerRebalanceListener;
+import org.apache.kafka.clients.consumer.internals.SubscriptionState;
+import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.Metric;
+import org.apache.kafka.common.MetricName;
+import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.InterruptException;
+import org.apache.kafka.common.errors.InvalidGroupIdException;
+import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.internals.ClusterResourceListeners;
+import org.apache.kafka.common.metrics.JmxReporter;
+import org.apache.kafka.common.metrics.KafkaMetricsContext;
+import org.apache.kafka.common.metrics.MetricConfig;
+import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.MetricsContext;
+import org.apache.kafka.common.metrics.MetricsReporter;
+import org.apache.kafka.common.metrics.Sensor;
+import org.apache.kafka.common.network.ChannelBuilder;
+import org.apache.kafka.common.network.Selector;
+import org.apache.kafka.common.requests.MetadataRequest;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.utils.AppInfoParser;
+import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Timer;
+import org.apache.kafka.common.utils.Utils;
+import org.slf4j.Logger;
 
 /**
  * A client that consumes records from a Kafka cluster.
@@ -1284,6 +1324,22 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
     /**
      * @throws KafkaException if the rebalance callback throws exception
+     *
+     * 拉取消息整体流程：
+     * 1.消费者客户端在处理消息时，会先从全局队列 {@link Fetcher#completedFetches} 中获取消息，如果拉取到，则直接返回进行消费。
+     * 如果是首次拉取，这个队列中是没有消息的，需要发送拉取数据请求从服务端拉取数据。
+     * 2.消费者拉取数据的异步请求，和生产者一样，拉取器会根据分区所在主副本节点对要拉取的分区进行分组（减少网络I/O）发送给各主副本节点。
+     * 如果之前的分区拉取到的数据还没有开始消费或没有消费完，这次拉取请求是不会对这些分区进行拉取的。
+     * 3.客户端等待服务端返回数据，在请求的回调里，会将拉取到的数据存到拉取器的全局变量中 {@link Fetcher#completedFetches}。
+     * 4.最后消费者客户端需要调用 {@link Fetcher#fetchedRecords()} 方法从队列里拉取数据消费。
+     *
+     * Note:
+     *  1.消费者客户端每次调用 {@link Fetcher#fetchedRecords()} 从全局队列中拉取消息时，并不是将当前队列里所有分区的所有数据都
+     *  拉回来进行消费。有一个变量 {@link Fetcher#maxPollRecords} 来控制每次从队列中拉取多少条消息进行消费，目的是为了让消费者
+     *  客户端在一次会话时间内完成消费，避免超时被协调者从消费组中移除。所以每个分区记录集可能会分多次次啊会被完全处理。
+     *  2.消费者从服务端拉取到的数据也是按照分区返回，每个分区返回的是多个消息批次，每个消息批次里又包含了多个消息。
+     *  3.拉取消息时的分区偏移量是来自分区订阅状态 {@link SubscriptionState.TopicPartitionState} 的偏移量，
+     *  在从全局队列中获取消息时，在返回消息之前，会更新订阅状态中分区信息的 position。
      */
     private Map<TopicPartition, List<ConsumerRecord<K, V>>> pollForFetches(Timer timer) {
         long pollTimeout = coordinator == null ? timer.remainingMs() :

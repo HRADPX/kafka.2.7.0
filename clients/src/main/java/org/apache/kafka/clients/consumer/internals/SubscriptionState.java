@@ -16,6 +16,24 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.LongSupplier;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
+
 import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.NodeApiVersions;
@@ -29,13 +47,6 @@ import org.apache.kafka.common.internals.PartitionStates;
 import org.apache.kafka.common.requests.EpochEndOffset;
 import org.apache.kafka.common.utils.LogContext;
 import org.slf4j.Logger;
-
-import java.util.*;
-import java.util.function.LongSupplier;
-import java.util.function.Predicate;
-import java.util.regex.Pattern;
-
-import static org.apache.kafka.clients.consumer.internals.Fetcher.hasUsableOffsetForLeaderEpochVersion;
 
 /**
  * A class for tracking the topics, partitions, and offsets for the consumer. A partition
@@ -1014,8 +1025,7 @@ public class SubscriptionState {
         boolean requiresPosition();
 
         /**
-         * Test if this state is considered to have a valid position which can be used for fetching
-         */
+         * Test if this state is considered to have a valid position which can be used for fetch    */
         boolean hasValidPosition();
     }
 
@@ -1024,6 +1034,7 @@ public class SubscriptionState {
      * {@link FetchState#validTransitions}.
      */
     enum FetchStates implements FetchState {
+        // 初试状态
         INITIALIZING() {
             @Override
             public Collection<FetchState> validTransitions() {
@@ -1041,6 +1052,7 @@ public class SubscriptionState {
             }
         },
 
+        // 可拉取状态，这个状态消费者就可以发送拉取数据了
         FETCHING() {
             @Override
             public Collection<FetchState> validTransitions() {
@@ -1058,6 +1070,8 @@ public class SubscriptionState {
             }
         },
 
+        // 消费者发送获取偏移量请求时，如果有些分区之前没有偏移量提交记录，就会从 INITIALIZING 转为这个状态
+        // 消费者后续会根据分区分配策略发送 LIST_OFFSET 请求去分区的主副本节点获取拉取偏移量
         AWAIT_RESET() {
             @Override
             public Collection<FetchState> validTransitions() {
@@ -1075,6 +1089,7 @@ public class SubscriptionState {
             }
         },
 
+        // 获取到了偏移量，但是需要校验偏移量的合法性
         AWAIT_VALIDATION() {
             @Override
             public Collection<FetchState> validTransitions() {

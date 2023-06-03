@@ -16,13 +16,61 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-import org.apache.kafka.clients.*;
+import static java.util.Collections.emptyList;
+
+import java.io.Closeable;
+import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.PriorityQueue;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import org.apache.kafka.clients.ApiVersion;
+import org.apache.kafka.clients.ApiVersions;
+import org.apache.kafka.clients.ClientResponse;
+import org.apache.kafka.clients.FetchSessionHandler;
+import org.apache.kafka.clients.Metadata;
+import org.apache.kafka.clients.NodeApiVersions;
+import org.apache.kafka.clients.StaleMetadataException;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.LogTruncationException;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
 import org.apache.kafka.clients.consumer.OffsetOutOfRangeException;
-import org.apache.kafka.clients.consumer.*;
+import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.apache.kafka.clients.consumer.internals.OffsetsForLeaderEpochClient.OffsetForEpochResult;
 import org.apache.kafka.clients.consumer.internals.SubscriptionState.FetchPosition;
-import org.apache.kafka.common.*;
-import org.apache.kafka.common.errors.*;
+import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.MetricName;
+import org.apache.kafka.common.Node;
+import org.apache.kafka.common.PartitionInfo;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.CorruptRecordException;
+import org.apache.kafka.common.errors.InvalidTopicException;
+import org.apache.kafka.common.errors.RecordTooLargeException;
+import org.apache.kafka.common.errors.RetriableException;
+import org.apache.kafka.common.errors.SerializationException;
+import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.message.ListOffsetRequestData.ListOffsetPartition;
@@ -31,27 +79,35 @@ import org.apache.kafka.common.message.ListOffsetResponseData.ListOffsetTopicRes
 import org.apache.kafka.common.metrics.Gauge;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
-import org.apache.kafka.common.metrics.stats.*;
+import org.apache.kafka.common.metrics.stats.Avg;
+import org.apache.kafka.common.metrics.stats.Max;
+import org.apache.kafka.common.metrics.stats.Meter;
+import org.apache.kafka.common.metrics.stats.Min;
+import org.apache.kafka.common.metrics.stats.Value;
+import org.apache.kafka.common.metrics.stats.WindowedCount;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.record.*;
-import org.apache.kafka.common.requests.*;
+import org.apache.kafka.common.record.BufferSupplier;
+import org.apache.kafka.common.record.ControlRecordType;
+import org.apache.kafka.common.record.Record;
+import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.record.Records;
+import org.apache.kafka.common.record.TimestampType;
+import org.apache.kafka.common.requests.FetchRequest;
+import org.apache.kafka.common.requests.FetchResponse;
+import org.apache.kafka.common.requests.ListOffsetRequest;
+import org.apache.kafka.common.requests.ListOffsetResponse;
+import org.apache.kafka.common.requests.MetadataRequest;
+import org.apache.kafka.common.requests.MetadataResponse;
+import org.apache.kafka.common.requests.OffsetsForLeaderEpochRequest;
 import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.utils.CloseableIterator;
+import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
-import org.apache.kafka.common.utils.*;
+import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
 import org.slf4j.helpers.MessageFormatter;
-
-import java.io.Closeable;
-import java.nio.ByteBuffer;
-import java.util.*;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
-import java.util.stream.Collectors;
-
-import static java.util.Collections.emptyList;
 
 /**
  * This class manages the fetching process with the brokers.
@@ -277,6 +333,7 @@ public class Fetcher<K, V> implements Closeable {
 
                                     // 保存拉取的数据到 completedFetches 中（分区粒度）
                                     // 消费者为了获取到消息，需要主动调用 fetchRecords 方法从这个队列中获取
+                                    // Note: 一个分区的记录集包含了多个消息
                                     completedFetches.add(new CompletedFetch(partition, partitionData,
                                             metricAggregator, batches, fetchOffset, responseVersion));
                                 }
@@ -567,6 +624,8 @@ public class Fetcher<K, V> implements Closeable {
         Map<TopicPartition, List<ConsumerRecord<K, V>>> fetched = new HashMap<>();
         Queue<CompletedFetch> pausedCompletedFetches = new ArrayDeque<>();
         // 最大拉取的记录数，通过这个变量用来控制单次轮询最大处理的消息的数量
+        // 因为消费者一次从服务端拉取的消息可能较多，客户端的处理能力可能比较弱，为了防止客户端处理这批消息发生超时
+        // 通过设置这个参数让客户端每次轮询只取能够处理的记录数
         int recordsRemaining = maxPollRecords;
 
         try {
@@ -579,9 +638,11 @@ public class Fetcher<K, V> implements Closeable {
                     if (records == null) break;
 
                     // initialized 默认是 false，所以这里首次进入应该是 true
+                    // 这个变量主要用于控制首次处理拉取到的记录集时进行一些校验工作和对分区状态的更新，在下面的初始化分区方法里（
+                    // initializeCompletedFetch）如果完成这些操作，会将这个变量设置为 true，第二次就不需要进行初始化操作
                     if (records.notInitialized()) {
                         try {
-                            // 初始化 nextInLineFetch
+                            // 初始化 nextInLineFetch，完成后通过循环会走到最后的一个分支处理
                             nextInLineFetch = initializeCompletedFetch(records);
                         } catch (Exception e) {
                             // Remove a completedFetch upon a parse with exception if (1) it contains no records, and
@@ -596,16 +657,22 @@ public class Fetcher<K, V> implements Closeable {
                             throw e;
                         }
                     } else {
+                        // 初始化过了，这种情况应该是下面 pause 引起的，如果管理员手动暂停对某个分区数据的拉取，
+                        // 会在下面的 if 条件中放到一个暂停队列中，这次跳过拉消息，但是在方法返回的 finally 语句中
+                        // 会从新把这些暂停分区的消息重新放到完成全局队列中，可能取消暂停这些分区的拉取，在下次执行
+                        // 时就不需要初始化了，因为上面已经初始化后了
                         nextInLineFetch = records;
                     }
                     completedFetches.poll();
                 } else if (subscriptions.isPaused(nextInLineFetch.partition)) {
+                    // 手动暂停对某个分区的数据拉取
                     // when the partition is paused we add the records back to the completedFetches queue instead of draining
                     // them so that they can be returned on a subsequent poll if the partition is resumed at that time
                     log.debug("Skipping fetching records for assigned partition {} because it is paused", nextInLineFetch.partition);
                     pausedCompletedFetches.add(nextInLineFetch);
                     nextInLineFetch = null;
                 } else {
+                    // 从记录集里获取不超过 recordsRemaining 个消息
                     List<ConsumerRecord<K, V>> records = fetchRecords(nextInLineFetch, recordsRemaining);
 
                     if (!records.isEmpty()) {
@@ -617,6 +684,7 @@ public class Fetcher<K, V> implements Closeable {
                             // this case shouldn't usually happen because we only send one fetch at a time per partition,
                             // but it might conceivably happen in some rare cases (such as partition leader changes).
                             // we have to copy to a new list because the old one may be immutable
+                            // 这种情况可能是分区的主副本节点发生变化
                             List<ConsumerRecord<K, V>> newRecords = new ArrayList<>(records.size() + currentRecords.size());
                             newRecords.addAll(currentRecords);
                             newRecords.addAll(records);
@@ -632,6 +700,7 @@ public class Fetcher<K, V> implements Closeable {
         } finally {
             // add any polled completed fetches for paused partitions back to the completed fetches queue to be
             // re-evaluated in the next poll
+            // 将暂停的分区的记录重新放到完成队列中，因为下次可能就取消暂停就又可以拉取了
             completedFetches.addAll(pausedCompletedFetches);
         }
 
@@ -666,7 +735,7 @@ public class Fetcher<K, V> implements Closeable {
                 log.trace("Returning {} fetched records at offset {} for assigned partition {}",
                         partRecords.size(), position, completedFetch.partition);
 
-                // 拉取到了消息
+                // 拉取到了消息会更新 completedFetch 里的 nextFetchOffset 变量
                 if (completedFetch.nextFetchOffset > position.offset) {
                     FetchPosition nextPosition = new FetchPosition(
                             completedFetch.nextFetchOffset,
@@ -674,6 +743,8 @@ public class Fetcher<K, V> implements Closeable {
                             position.currentLeader);
                     log.trace("Update fetching position to {} for partition {}", nextPosition, completedFetch.partition);
                     // 更新下次拉取数据的偏移量
+                    // 这里虽然更新的拉取偏移量，但是如果这个分区的处理还没有被客户端处理完成，消费者下次从服务端拉取消息时是不会再拉这个分区
+                    // 的数据，所以不用担心会拉取到重复的数据。
                     subscriptions.position(completedFetch.partition, nextPosition);
                 }
 
@@ -696,6 +767,7 @@ public class Fetcher<K, V> implements Closeable {
         }
 
         log.trace("Draining fetched records for partition {}", completedFetch.partition);
+        // 异常情况，表示这个消费者当前不能消费这个分区的数据，做一些清理工作
         completedFetch.drain();
 
         return emptyList();
@@ -1242,12 +1314,14 @@ public class Fetcher<K, V> implements Closeable {
         Errors error = partition.error();
 
         try {
+            // 判断分区是否存在有效偏移量
             if (!subscriptions.hasValidPosition(tp)) {
                 // this can happen when a rebalance happened while fetch is still in-flight
                 log.debug("Ignoring fetched records for partition {} since it no longer has valid position", tp);
             } else if (error == Errors.NONE) {
                 // we are interested in this fetch only if the beginning offset matches the
                 // current consumed position
+                // 判断记录集里的拉取偏移量和分区状态里的 position 是否相同，分区记录集里的拉取偏移量实际上也是来自分区状态
                 FetchPosition position = subscriptions.position(tp);
                 if (position == null || position.offset != fetchOffset) {
                     log.debug("Discarding stale fetch response for partition {} since its offset {} does not match " +
@@ -1278,16 +1352,19 @@ public class Fetcher<K, V> implements Closeable {
                     }
                 }
 
+                // 更新 HW
                 if (partition.highWatermark() >= 0) {
                     log.trace("Updating high watermark for partition {} to {}", tp, partition.highWatermark());
                     subscriptions.updateHighWatermark(tp, partition.highWatermark());
                 }
 
+                // 更新 logStartOffset
                 if (partition.logStartOffset() >= 0) {
                     log.trace("Updating log start offset for partition {} to {}", tp, partition.logStartOffset());
                     subscriptions.updateLogStartOffset(tp, partition.logStartOffset());
                 }
 
+                // 更新 logStartOffset
                 if (partition.lastStableOffset() >= 0) {
                     log.trace("Updating last stable offset for partition {} to {}", tp, partition.lastStableOffset());
                     subscriptions.updateLastStableOffset(tp, partition.lastStableOffset());
@@ -1302,6 +1379,7 @@ public class Fetcher<K, V> implements Closeable {
                     });
                 }
 
+                // 初始化完成
                 nextCompletedFetch.initialized = true;
             } else if (error == Errors.NOT_LEADER_OR_FOLLOWER ||
                        error == Errors.REPLICA_NOT_AVAILABLE ||
@@ -1322,6 +1400,7 @@ public class Fetcher<K, V> implements Closeable {
                         log.debug("Discarding stale fetch response for partition {} since the fetched offset {} " +
                                 "does not match the current offset {}", tp, fetchOffset, position);
                     } else {
+                        // 使用默认分区重置策略重新拉取分区偏移量
                         handleOffsetOutOfRange(position, tp);
                     }
                 } else {
@@ -1543,6 +1622,7 @@ public class Fetcher<K, V> implements Closeable {
 
         private Record nextFetchedRecord() {
             while (true) {
+                // 这个 records 默认是 null，没有初始化
                 if (records == null || !records.hasNext()) {
                     maybeCloseRecordStream();
 
@@ -1554,16 +1634,20 @@ public class Fetcher<K, V> implements Closeable {
                         // fetching the same batch repeatedly).
                         if (currentBatch != null)
                             nextFetchOffset = currentBatch.nextOffset();
+                        // 消费完了，设置 isConsumed 为 true，表示这个分区的消息已经被处理结束
                         drain();
                         return null;
                     }
 
+                    // batches 是拉取到消息封装消息批时初始化
+                    // batches 包含多个消息批次，一个消息批次又包含多个记录
                     currentBatch = batches.next();
                     lastEpoch = currentBatch.partitionLeaderEpoch() == RecordBatch.NO_PARTITION_LEADER_EPOCH ?
                             Optional.empty() : Optional.of(currentBatch.partitionLeaderEpoch());
 
                     maybeEnsureValid(currentBatch);
 
+                    // todo huangran 这里是干嘛的
                     if (isolationLevel == IsolationLevel.READ_COMMITTED && currentBatch.hasProducerId()) {
                         // remove from the aborted transaction queue all aborted transactions which have begun
                         // before the current batch's last offset and add the associated producerIds to the
@@ -1582,6 +1666,7 @@ public class Fetcher<K, V> implements Closeable {
                         }
                     }
 
+                    // 初始化 records
                     records = currentBatch.streamingIterator(decompressionBufferSupplier);
                 } else {
                     Record record = records.next();
@@ -1628,6 +1713,7 @@ public class Fetcher<K, V> implements Closeable {
                     records.add(parseRecord(partition, currentBatch, lastRecord));
                     recordsRead++;
                     bytesRead += lastRecord.sizeInBytes();
+                    // 偏移量自增
                     nextFetchOffset = lastRecord.offset() + 1;
                     // In some cases, the deserialization may have thrown an exception and the retry may succeed,
                     // we allow user to move forward in this case.
