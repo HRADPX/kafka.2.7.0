@@ -382,6 +382,7 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
       var hi = end
       while(lo < hi) {
         val mid = (lo + hi + 1) >>> 1
+        // 里面已经将索引的偏移量转为绝对偏移量
         val found = parseEntry(idx, mid)
         val compareResult = compareIndexEntry(found, target, searchEntity)
         if(compareResult > 0)

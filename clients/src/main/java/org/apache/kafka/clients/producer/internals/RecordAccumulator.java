@@ -225,7 +225,7 @@ public final class RecordAccumulator {
                     return appendResult;
                 }
 
-                // 创建批次
+                // 创建批次，默认不压缩，baseOffset = 0(表示每个批次都是相对偏移量)
                 MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
                 ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, nowMs);
                 // 追加消息，这次一定会成功

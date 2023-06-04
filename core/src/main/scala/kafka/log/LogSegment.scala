@@ -51,11 +51,13 @@ import scala.math._
  * @param indexIntervalBytes The approximate number of bytes between entries in the index
  * @param rollJitterMs The maximum random jitter subtracted from the scheduled segment roll time
  * @param time The time instance
+ *
+ * 日志分段，由数据文件和索引文件组成。创建新的日志分段，会创建对应的数据文件和索引文件
+ * [[kafka.log.LogSegment.open]]
  */
-// 日志分段，由数据文件和索引文件组成
 @nonthreadsafe
-class LogSegment private[log] (val log: FileRecords,
-                               val lazyOffsetIndex: LazyIndex[OffsetIndex],
+class LogSegment private[log] (val log: FileRecords,                         // 数据文件
+                               val lazyOffsetIndex: LazyIndex[OffsetIndex],  // 索引文件
                                val lazyTimeIndex: LazyIndex[TimeIndex],
                                val txnIndex: TransactionIndex,
                                val baseOffset: Long,
@@ -63,15 +65,15 @@ class LogSegment private[log] (val log: FileRecords,
                                val rollJitterMs: Long,
                                val time: Time) extends Logging {
 
-  // 索引
+  // 索引文件，用于保存消息偏移量到物理位置的索引
   def offsetIndex: OffsetIndex = lazyOffsetIndex.get
 
   def timeIndex: TimeIndex = lazyTimeIndex.get
 
   // 判断是否需要创建一个新的 segment
-  // 1. 当前数据文件大小 + 要写入数据大小超过数据文件的最大容量（1GB)
-  // 2. 每隔一段时间，自动创建一个新的数据文件
-  // 3. 偏移量索引已满，时间索引已满
+  // 1. 当前数据文件大小 + 要写入数据大小超过数据文件的最大容量（1GB)，对应变量 log.segment.bytes
+  // 2. 每隔一段时间，自动创建一个新的数据文件， 对应变量 log.roll.hours
+  // 3. 索引文件已满
   def shouldRoll(rollParams: RollParams): Boolean = {
     val reachedRollMs = timeWaitedForRoll(rollParams.now, rollParams.maxTimestampInMessages) > rollParams.maxSegmentMs - rollJitterMs
     // Kafka 默认一个 segment 大小是 1G，如果当前的 segment 大小再加上写入进去的数据大小超过 1G，就会新创建一个 segment
@@ -103,6 +105,8 @@ class LogSegment private[log] (val log: FileRecords,
   private var created = time.milliseconds
 
   /* the number of bytes since we last added an entry in the offset index */
+  // 这个字段记录了从上次写过索引后又写入了多少字节的数据文件，用于判断是否需要写索引了
+  // 如果这个值超过设置的写索引阈值（4096）就会写一条索引记录，然后重置为 0
   private var bytesSinceLastIndexEntry = 0
 
   // The timestamp we used for time based log rolling and for ensuring max compaction delay
@@ -174,10 +178,10 @@ class LogSegment private[log] (val log: FileRecords,
         offsetOfMaxTimestampSoFar = shallowOffsetOfMaxTimestamp
       }
       // append an entry to the index (if needed)
-      // 写索引（稀疏），不是来一条数据就写一下索引，而是达到一定条件才会去索引
+      // 写索引（稀疏），不是来一条数据就写一下索引，而是达到一定条件才会去索引（为了可以快速根据偏移量定位到消息在数据文件中的位置）
       // 默认当写了 4096 字节的时候就会写一条索引
       if (bytesSinceLastIndexEntry > indexIntervalBytes) {
-        // 写索引
+        // 写索引，largestOffset: 追加消息集的起始偏移量， physicalPosition: 第一条消息在数据文件中的物理位置
         offsetIndex.append(largestOffset, physicalPosition)
         timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestampSoFar)
         bytesSinceLastIndexEntry = 0
@@ -286,7 +290,9 @@ class LogSegment private[log] (val log: FileRecords,
    */
   @threadsafe
   private[log] def translateOffset(offset: Long, startingFilePosition: Int = 0): LogOffsetPosition = {
+    // 查询索引文件，返回的是找到的索引文件的基准偏移量和物理位置
     val mapping = offsetIndex.lookup(offset)
+    // 根据索引文件搜索绝对偏移量为 offset 的绝对位置
     log.searchForOffsetWithSize(offset, max(mapping.position, startingFilePosition))
   }
 
@@ -303,13 +309,14 @@ class LogSegment private[log] (val log: FileRecords,
    *         or null if the startOffset is larger than the largest offset in this log
    */
   @threadsafe
-  def read(startOffset: Long,
-           maxSize: Int,
-           maxPosition: Long = size,
+  def read(startOffset: Long,           // 客户端的起始偏移量
+           maxSize: Int,               // 拉取的最大大小
+           maxPosition: Long = size,  // 最大物理位置
            minOneMessage: Boolean = false): FetchDataInfo = {
     if (maxSize < 0)
       throw new IllegalArgumentException(s"Invalid max size $maxSize for log read from segment $log")
 
+    // 起始偏移量转换为起始的物理位置
     val startOffsetAndSize = translateOffset(startOffset)
 
     // if the start position is already off the end of the log, return null
@@ -328,8 +335,10 @@ class LogSegment private[log] (val log: FileRecords,
       return FetchDataInfo(offsetMetadata, MemoryRecords.EMPTY)
 
     // calculate the length of the message set to read based on whether or not they gave us a maxOffset
+    // 读取长度
     val fetchSize: Int = min((maxPosition - startPosition).toInt, adjustedMaxSize)
 
+    // 根据起始位置和长度，读取文件数据
     FetchDataInfo(offsetMetadata, log.slice(startPosition, fetchSize),
       firstEntryIncomplete = adjustedMaxSize < startOffsetAndSize.size)
   }

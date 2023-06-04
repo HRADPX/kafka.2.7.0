@@ -20,6 +20,7 @@ package kafka.log
 import java.io.File
 import java.nio.ByteBuffer
 
+import kafka.common.IndexOffsetOverflowException
 import kafka.utils.CoreUtils.inLock
 import kafka.utils.Logging
 import org.apache.kafka.common.errors.InvalidOffsetException
@@ -48,6 +49,15 @@ import org.apache.kafka.common.errors.InvalidOffsetException
  *
  * All external APIs translate from relative offsets to full offsets, so users of this class do not interact with the internal
  * storage format.
+ *
+ * 索引文件映射偏移量到文件的物理地址，不会为每条消息都建立索引，所以是稀疏的。
+ * 索引条目的偏移量存储的是相对于基准偏移量（baseOffset）的相对偏移量，而不是绝对偏移量， 相对偏移量 = 绝对偏移量 - 基准偏移量。
+ * 索引条目的相对偏移量和物理位置各占用 4 字节，即 1 个索引占用 8 字节。
+ * 索引是通过内存映射的方式，将整个索引文件都放入内存，加快偏移量的查询。
+ *
+ * file: 索引文件，与日志文件同目录
+ * baseOffset: 创建索引文件时，日志分段的 baseOffset
+ * maxIndexSize: 日志文件的大小，默认 10MB
  */
 // Avoid shadowing mutable `file` in AbstractIndex
 class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writable: Boolean = true)
@@ -87,12 +97,14 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
    */
   def lookup(targetOffset: Long): OffsetPosition = {
     maybeLock(lock) {
+      // copy 一份，因为这个过程中 mmap 会发生变化
       val idx = mmap.duplicate
+      // 找到小于 targetOffset 并且最大的索引位置，里面实现本质是一个 binary search
       val slot = largestLowerBoundSlotFor(idx, targetOffset, IndexSearchType.KEY)
       if(slot == -1)
         OffsetPosition(baseOffset, 0)
       else
-        parseEntry(idx, slot)
+        parseEntry(idx, slot)  // 返回的是找到索引的基准偏移量和物理位置，这个基准偏移量不一定就是 targetOffset
     }
   }
 
@@ -112,8 +124,10 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
     }
   }
 
+  // 索引条目占 8 个字节，获取索引文件第 n 个索引条目的相对偏移量
   private def relativeOffset(buffer: ByteBuffer, n: Int): Int = buffer.getInt(n * entrySize)
 
+  // 获取索引文件第 n 个条目的物理位置
   private def physical(buffer: ByteBuffer, n: Int): Int = buffer.getInt(n * entrySize + 4)
 
   override protected def parseEntry(buffer: ByteBuffer, n: Int): OffsetPosition = {
@@ -143,7 +157,7 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
       require(!isFull, "Attempt to append to a full index (size = " + _entries + ").")
       if (_entries == 0 || offset > _lastOffset) {
         trace(s"Adding index entry $offset => $position to ${file.getAbsolutePath}")
-        // offset: 逻辑上的位置
+        // offset: 逻辑上的位置，offset - baseOffset
         mmap.putInt(relativeOffset(offset))
         // 物理位置，这个消息再磁盘的哪个位置
         mmap.putInt(position)

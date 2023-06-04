@@ -42,6 +42,7 @@ public class FileLogInputStream implements LogInputStream<FileLogInputStream.Fil
     private int position;
     private final int end;
     private final FileRecords fileRecords;
+    // baseOffset + length + leaderEpoch + magic
     private final ByteBuffer logHeaderBuffer = ByteBuffer.allocate(HEADER_SIZE_UP_TO_MAGIC);
 
     /**
@@ -68,7 +69,9 @@ public class FileLogInputStream implements LogInputStream<FileLogInputStream.Fil
         Utils.readFullyOrFail(channel, logHeaderBuffer, position, "log header");
 
         logHeaderBuffer.rewind();
+        // baseOffset
         long offset = logHeaderBuffer.getLong(OFFSET_OFFSET);
+        // batch size
         int size = logHeaderBuffer.getInt(SIZE_OFFSET);
 
         // V0 has the smallest overhead, stricter checking is done later

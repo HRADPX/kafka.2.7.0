@@ -102,6 +102,7 @@ private[log] object LogValidator extends Logging {
         assignOffsetsNonCompressed(records, topicPartition, offsetCounter, now, compactedTopic, timestampType, timestampDiffMaxMs,
           partitionLeaderEpoch, origin, magic, brokerTopicStats)
     } else {
+      // 消息经过压缩
       validateMessagesAndAssignOffsetsCompressed(records, topicPartition, offsetCounter, time, now, sourceCodec, targetCodec, compactedTopic,
         magic, timestampType, timestampDiffMaxMs, partitionLeaderEpoch, origin, interBrokerProtocolVersion, brokerTopicStats)
     }
@@ -242,8 +243,10 @@ private[log] object LogValidator extends Logging {
         validateRecord(batch, topicPartition, record, batchIndex, now, timestampType,
           timestampDiffMaxMs, compactedTopic, brokerTopicStats).foreach(recordError => recordErrors += recordError)
         // we fail the batch if any record fails, so we stop appending if any record fails
-        if (recordErrors.isEmpty)
+        if (recordErrors.isEmpty) {
+          // 设置绝对偏移量
           builder.appendWithOffset(offsetCounter.getAndIncrement(), record)
+        }
       }
 
       processRecordErrors(recordErrors)
@@ -277,9 +280,11 @@ private[log] object LogValidator extends Logging {
     var offsetOfMaxTimestamp = -1L
     val initialOffset = offsetCounter.value
 
+    // 获取第一个消息批次
     val firstBatch = getFirstBatchAndMaybeValidateNoMoreBatches(records, NoCompressionCodec)
 
     records.batches.forEach { batch =>
+      // 校验第各个批次
       validateBatch(topicPartition, firstBatch, batch, origin, magic, brokerTopicStats)
 
       var maxBatchTimestamp = RecordBatch.NO_TIMESTAMP
@@ -307,6 +312,7 @@ private[log] object LogValidator extends Logging {
         offsetOfMaxTimestamp = offsetOfMaxBatchTimestamp
       }
 
+      // 设置各个批次的 baseOffset
       batch.setLastOffset(offsetCounter.value - 1)
 
       if (batch.magic >= RecordBatch.MAGIC_VALUE_V2)
@@ -370,6 +376,7 @@ private[log] object LogValidator extends Logging {
     }
 
     // No in place assignment situation 1
+    // 压缩编码不一致，不能压缩
     var inPlaceAssignment = sourceCodec == targetCodec
 
     var maxTimestamp = RecordBatch.NO_TIMESTAMP
@@ -457,6 +464,7 @@ private[log] object LogValidator extends Logging {
       // we can update the batch only and write the compressed payload as is;
       // again we assume only one record batch within the compressed set
       val batch = records.batches.iterator.next()
+      // 计算 lastOffset, 起始偏移量 + 合法的记录消息数量
       val lastOffset = offsetCounter.addAndGet(validatedRecords.size) - 1
 
       batch.setLastOffset(lastOffset)

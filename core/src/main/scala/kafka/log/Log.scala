@@ -231,6 +231,8 @@ case object SegmentDeletion extends LogStartOffsetIncrementReason {
  * @param time The time instance used for checking the clock
  * @param maxProducerIdExpirationMs The maximum amount of time to wait before a producer id is considered expired
  * @param producerIdExpirationCheckIntervalMs How often to check for producer ids which need to be expired
+ *
+ *  topic -> partition(s) -> Replica -> Log -> segments -> 日志文件
  */
 @threadsafe
 class Log(@volatile private var _dir: File,
@@ -263,6 +265,8 @@ class Log(@volatile private var _dir: File,
   /* last time it was flushed */
   private val lastFlushedTime = new AtomicLong(time.milliseconds)
 
+  // 这个变量是 下一个偏移量元数据，它和 logEndOffsetMetadata 一样（日志结束的偏移量）
+  // #logEndOffsetMetadata
   @volatile private var nextOffsetMetadata: LogOffsetMetadata = _
 
   /* The earliest offset which is part of an incomplete transaction. This is used to compute the
@@ -290,7 +294,7 @@ class Log(@volatile private var _dir: File,
   @volatile private var highWatermarkMetadata: LogOffsetMetadata = LogOffsetMetadata(logStartOffset)
 
   /* the actual segments of the log */
-  // 日志包含多个日志分段
+  // 日志管理了所有的日志分段，保存了基准偏移量和日志分段的映射关系，消息最终是通过 Segment 对象保存到日志文件
   private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
 
   // Visible for testing
@@ -1096,7 +1100,8 @@ class Log(@volatile private var _dir: File,
                      leaderEpoch: Int,
                      ignoreRecordSize: Boolean): LogAppendInfo = {
     maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
-      // 1) 校验数据
+      // 1) 校验数据，返回的是一个日志追加信息对象，表示消息的一些概要信息，
+      // 包含消息的第一条和最后一条信息的偏移量，消息集的总字节大小，偏移量是否单调递增等
       val appendInfo = analyzeAndValidateRecords(records, origin, ignoreRecordSize)
 
       // return if we have no valid messages or if this is a duplicate of the last appended entry
@@ -1112,14 +1117,16 @@ class Log(@volatile private var _dir: File,
         if (assignOffsets) {
           // assign offsets to the message set
           // 2) 分配 offset
+          // 存储到日志文件中的消息偏移量是分区级别的绝对偏移量，为消息集分配绝对偏移量时，以 nextOffsetMetadata 的偏移量
+          // 作为起始偏移量，分配完成后还要更新 nextOffsetMetadata 的偏移量值。
           val offset = new LongRef(nextOffsetMetadata.messageOffset)
-          // 更新偏移量
-          appendInfo.firstOffset = Some(offset.value)
+          appendInfo.firstOffset = Some(offset.value)     // 记录这批消息的起始偏移量
           val now = time.milliseconds
           val validateAndOffsetAssignResult = try {
+            // 基于起始偏移量，为所有有效的消息集中的每条消息重新分配绝对偏移量
             LogValidator.validateMessagesAndAssignOffsets(validRecords,
               topicPartition,
-              offset,
+              offset,   // 起始偏移量
               time,
               now,
               appendInfo.sourceCodec,
@@ -1394,11 +1401,15 @@ class Log(@volatile private var _dir: File,
   private def analyzeAndValidateRecords(records: MemoryRecords,
                                         origin: AppendOrigin,
                                         ignoreRecordSize: Boolean): LogAppendInfo = {
+    // 消息数量
     var shallowMessageCount = 0
+    // 有效字节数
     var validBytesCount = 0
+    // 第一条和最后一条消息的偏移量
     var firstOffset: Option[Long] = None
     var lastOffset = -1L
     var sourceCodec: CompressionCodec = NoCompressionCodec
+    // 是否单调
     var monotonic = true
     var maxTimestamp = RecordBatch.NO_TIMESTAMP
     var offsetOfMaxTimestamp = -1L
@@ -1418,17 +1429,22 @@ class Log(@volatile private var _dir: File,
       // case, validation will be more lenient.
       // Also indicate whether we have the accurate first offset or not
       if (!readFirstMessage) {
-        if (batch.magic >= RecordBatch.MAGIC_VALUE_V2)
+        if (batch.magic >= RecordBatch.MAGIC_VALUE_V2) {
+          // 第一条信息更新 firstOffset
           firstOffset = Some(batch.baseOffset)
+        }
+        // 第一批次的 lastOffset
         lastOffsetOfFirstBatch = batch.lastOffset
         readFirstMessage = true
       }
 
       // check that offsets are monotonically increasing
+      //
       if (lastOffset >= batch.lastOffset)
         monotonic = false
 
       // update the last offset seen
+      // 更新消息集的 lastOffset
       lastOffset = batch.lastOffset
 
       // Check if the message sizes are valid.
@@ -1441,6 +1457,7 @@ class Log(@volatile private var _dir: File,
       }
 
       // check the validity of the message by checking CRC
+      // CRC 校验
       if (!batch.isValid) {
         brokerTopicStats.allTopicsStats.invalidMessageCrcRecordsPerSec.mark()
         throw new CorruptRecordException(s"Record is corrupt (stored crc = ${batch.checksum()}) in topic partition $topicPartition.")
@@ -1451,6 +1468,7 @@ class Log(@volatile private var _dir: File,
         offsetOfMaxTimestamp = lastOffset
       }
 
+      // 更新有效消息和字节数
       shallowMessageCount += 1
       validBytesCount += batchSize
 
@@ -1460,7 +1478,9 @@ class Log(@volatile private var _dir: File,
     }
 
     // Apply broker-side compression if any
+    // config.compressionType = producer
     val targetCodec = BrokerCompressionCodec.getTargetCompressionCodec(config.compressionType, sourceCodec)
+    // 返回日志追加对象，它里面是不包含具体消息内容
     LogAppendInfo(firstOffset, lastOffset, maxTimestamp, offsetOfMaxTimestamp, RecordBatch.NO_TIMESTAMP, logStartOffset,
       RecordConversionStats.EMPTY, sourceCodec, targetCodec, shallowMessageCount, validBytesCount, monotonic, lastOffsetOfFirstBatch)
   }
@@ -1530,7 +1550,9 @@ class Log(@volatile private var _dir: File,
       // Because we don't use the lock for reading, the synchronization is a little bit tricky.
       // We create the local variables to avoid race conditions with updates to the log.
       val endOffsetMetadata = nextOffsetMetadata
+      // 最大能够读取的消息的偏移量上限（不含该值）
       val endOffset = endOffsetMetadata.messageOffset
+      // 先根据 startOffset 找到对应的日志分段
       var segmentEntry = segments.floorEntry(startOffset)
 
       // return error on attempt to read beyond the log end offset or read below log start offset
@@ -1538,12 +1560,14 @@ class Log(@volatile private var _dir: File,
         throw new OffsetOutOfRangeException(s"Received request for offset $startOffset for partition $topicPartition, " +
           s"but we only have log segments in the range $logStartOffset to $endOffset.")
 
+      // 隔离级别，用于控制最大能读取的偏移量大小
       val maxOffsetMetadata = isolation match {
         case FetchLogEnd => endOffsetMetadata
         case FetchHighWatermark => fetchHighWatermarkMetadata
         case FetchTxnCommitted => fetchLastStableOffsetMetadata
       }
 
+      // 异常 case
       if (startOffset == maxOffsetMetadata.messageOffset) {
         return emptyFetchDataInfo(maxOffsetMetadata, includeAbortedTxns)
       } else if (startOffset > maxOffsetMetadata.messageOffset) {
@@ -1554,6 +1578,7 @@ class Log(@volatile private var _dir: File,
       // Do the read on the segment with a base offset less than the target offset
       // but if that segment doesn't contain any messages with an offset greater than that
       // continue to read from successive segments until we get some messages or we reach the end of the log
+      // 读取数据，如果当前分段没有读取到数据，会继续往后找下一个日志分段，直到读到数据或者没有数据可读为止
       while (segmentEntry != null) {
         val segment = segmentEntry.getValue
 
@@ -1567,6 +1592,7 @@ class Log(@volatile private var _dir: File,
         }
 
         val fetchInfo = segment.read(startOffset, maxLength, maxPosition, minOneMessage)
+        // 如果这个分段读不到数据，会到更高的分段读取
         if (fetchInfo == null) {
           segmentEntry = segments.higherEntry(segmentEntry.getKey)
         } else {
@@ -1869,6 +1895,7 @@ class Log(@volatile private var _dir: File,
 
   /**
    * The offset metadata of the next message that will be appended to the log
+   * logEndOffsetMetadata 针对读操作
    */
   def logEndOffsetMetadata: LogOffsetMetadata = nextOffsetMetadata
 
@@ -1895,7 +1922,7 @@ class Log(@volatile private var _dir: File,
    * 一般来说每次写文件都是写入最后一个文件中。
    */
   private def maybeRoll(messagesSize: Int, appendInfo: LogAppendInfo): LogSegment = {
-    // 获取当前最新的 segment
+    // 获取当前最新的 segment，即获取 segments 的最后一个元素，作为日志最新的活动分区。
     val segment = activeSegment
     val now = time.milliseconds
 
@@ -1942,13 +1969,13 @@ class Log(@volatile private var _dir: File,
       val start = time.hiResClockMs()
       lock synchronized {
         checkIfMemoryMappedBufferClosed()
-        // 获取 LEO 的值作为最新的一个偏移量
+        // 获取上一个 Segment 的 LEO（LogEndOffset） 的值（起始就是 nextOffsetMetadata 的消息偏移量）
+        // 作为新创建的 Segment 的 baseOffset（起始偏移量）
         val newOffset = math.max(expectedNextOffset.getOrElse(0L), logEndOffset)
         // 新建一个文件，用 LEO 的名字作为文件名
         val logFile = Log.logFile(dir, newOffset)
 
-        // todo huangran 为什么会存在
-        // 如果文件已经存在，删除文件
+        // 如果文件已经存在，删除文件，原因可能是索引文件可能满了（？）
         if (segments.containsKey(newOffset)) {
           // segment with the same base offset already exists and loaded
           if (activeSegment.baseOffset == newOffset && activeSegment.size == 0) {
@@ -1964,6 +1991,7 @@ class Log(@volatile private var _dir: File,
                                      s" =max(provided offset = $expectedNextOffset, LEO = $logEndOffset) while it already exists. Existing " +
                                      s"segment is ${segments.get(newOffset)}.")
           }
+          // baseOffset 错误小于上一个 Segment 的 baseOffset
         } else if (!segments.isEmpty && newOffset < activeSegment.baseOffset) {
           throw new KafkaException(
             s"Trying to roll a new log segment for topic partition $topicPartition with " +
@@ -2003,6 +2031,7 @@ class Log(@volatile private var _dir: File,
 
         // We need to update the segment base offset and append position data of the metadata when log rolls.
         // The next offset should not change.
+        // 更新 nextOffsetMetadata 的消息偏移量作为下一批消息的起始偏移量
         updateLogEndOffset(nextOffsetMetadata.messageOffset)
 
         // schedule an asynchronous flush of the old segment
@@ -2628,6 +2657,7 @@ object Log {
    * @param dir The directory in which the log will reside
    * @param offset The base offset of the log file
    * @param suffix The suffix to be appended to the file name ("", ".deleted", ".cleaned", ".swap", etc.)
+   * 索引文件和日志文件在同级目录，后缀 .index，索引名日志分段的基准偏移量
    */
   def offsetIndexFile(dir: File, offset: Long, suffix: String = ""): File =
     new File(dir, filenamePrefixFromOffset(offset) + IndexFileSuffix + suffix)
