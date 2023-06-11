@@ -16,7 +16,11 @@
  */
 package org.apache.kafka.common.record;
 
-import static org.apache.kafka.common.record.RecordBatch.MAGIC_VALUE_V2;
+import org.apache.kafka.common.InvalidRecordException;
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.header.internals.RecordHeader;
+import org.apache.kafka.common.utils.*;
+import org.apache.kafka.common.utils.PrimitiveRef.IntRef;
 
 import java.io.DataInput;
 import java.io.DataOutputStream;
@@ -27,15 +31,7 @@ import java.util.Arrays;
 import java.util.Objects;
 import java.util.zip.Checksum;
 
-import org.apache.kafka.common.InvalidRecordException;
-import org.apache.kafka.common.header.Header;
-import org.apache.kafka.common.header.internals.RecordHeader;
-import org.apache.kafka.common.utils.ByteUtils;
-import org.apache.kafka.common.utils.Checksums;
-import org.apache.kafka.common.utils.Crc32C;
-import org.apache.kafka.common.utils.PrimitiveRef;
-import org.apache.kafka.common.utils.PrimitiveRef.IntRef;
-import org.apache.kafka.common.utils.Utils;
+import static org.apache.kafka.common.record.RecordBatch.MAGIC_VALUE_V2;
 
 /**
  * This class implements the inner record format for magic 2 and above. The schema is as follows:
@@ -178,7 +174,7 @@ public class DefaultRecord implements Record {
      * Length => Varint
      * Attributes => Int8
      * TimestampDelta => Varlong
-     * OffsetDelta => Varint
+     * OffsetDelta => Varint  消息的相对偏移量
      * Key => Bytes
      * Value => Bytes
      *
@@ -186,8 +182,9 @@ public class DefaultRecord implements Record {
      *  消息长度: 可变(整个消息的长度)
      *  Attribute: 1字节
      *  TimestampDelta: 可变
-     *  OffsetDelta: 可变
-     *  key:
+     *  OffsetDelta: 可变，消息的相对偏移量
+     *  key: keyByte
+     *  value: valueBytes
      *
      * @see DefaultRecord
      */

@@ -316,14 +316,16 @@ class LogSegment private[log] (val log: FileRecords,                         // 
     if (maxSize < 0)
       throw new IllegalArgumentException(s"Invalid max size $maxSize for log read from segment $log")
 
-    // 起始偏移量转换为起始的物理位置
+    // 起始偏移量转换为所在批次的起始的物理位置
     val startOffsetAndSize = translateOffset(startOffset)
 
     // if the start position is already off the end of the log, return null
     if (startOffsetAndSize == null)
       return null
 
+    // 批次开始的位置
     val startPosition = startOffsetAndSize.position
+    // startOffset 目标偏移量, baseOffset 分段的起始偏移量， startPosition 批次开始的物理位置
     val offsetMetadata = LogOffsetMetadata(startOffset, this.baseOffset, startPosition)
 
     val adjustedMaxSize =

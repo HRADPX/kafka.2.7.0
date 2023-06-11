@@ -97,10 +97,12 @@ private[log] object LogValidator extends Logging {
       if (!records.hasMatchingMagic(magic))
         convertAndAssignOffsetsNonCompressed(records, topicPartition, offsetCounter, compactedTopic, time, now, timestampType,
           timestampDiffMaxMs, magic, partitionLeaderEpoch, origin, brokerTopicStats)
-      else
+      else {
         // Do in-place validation, offset assignment and maybe set timestamp
+        // 默认不压缩，走这里
         assignOffsetsNonCompressed(records, topicPartition, offsetCounter, now, compactedTopic, timestampType, timestampDiffMaxMs,
           partitionLeaderEpoch, origin, magic, brokerTopicStats)
+      }
     } else {
       // 消息经过压缩
       validateMessagesAndAssignOffsetsCompressed(records, topicPartition, offsetCounter, time, now, sourceCodec, targetCodec, compactedTopic,
@@ -154,6 +156,7 @@ private[log] object LogValidator extends Logging {
           throw new InvalidRecordException(s"Invalid reported count for record batch: $count in topic partition $topicPartition.")
         }
 
+        // numRecords != lastOffset + 1
         if (countFromOffsets != batch.countOrNull) {
           brokerTopicStats.allTopicsStats.invalidOffsetOrSequenceRecordsPerSec.mark()
           throw new InvalidRecordException(s"Inconsistent batch offset range [${batch.baseOffset}, ${batch.lastOffset}] " +
@@ -280,7 +283,7 @@ private[log] object LogValidator extends Logging {
     var offsetOfMaxTimestamp = -1L
     val initialOffset = offsetCounter.value
 
-    // 获取第一个消息批次
+    // 获取第一个消息批次，magic >= 2 也只有一个批次
     val firstBatch = getFirstBatchAndMaybeValidateNoMoreBatches(records, NoCompressionCodec)
 
     records.batches.forEach { batch =>
@@ -312,7 +315,7 @@ private[log] object LogValidator extends Logging {
         offsetOfMaxTimestamp = offsetOfMaxBatchTimestamp
       }
 
-      // 设置各个批次的 baseOffset
+      // 虽然方法名叫 setLastOffset，但是实际是设置批次的 baseOffset，将相对偏移量转换为绝对偏移量，实现类 DefaultRecordBatch
       batch.setLastOffset(offsetCounter.value - 1)
 
       if (batch.magic >= RecordBatch.MAGIC_VALUE_V2)

@@ -16,20 +16,6 @@
  */
 package org.apache.kafka.common.record;
 
-import static org.apache.kafka.common.record.Records.LOG_OVERHEAD;
-
-import java.io.DataInputStream;
-import java.io.EOFException;
-import java.io.IOException;
-import java.nio.BufferUnderflowException;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.NoSuchElementException;
-import java.util.Objects;
-
 import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.errors.CorruptRecordException;
@@ -38,6 +24,15 @@ import org.apache.kafka.common.utils.ByteBufferOutputStream;
 import org.apache.kafka.common.utils.ByteUtils;
 import org.apache.kafka.common.utils.CloseableIterator;
 import org.apache.kafka.common.utils.Crc32C;
+
+import java.io.DataInputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.util.*;
+
+import static org.apache.kafka.common.record.Records.LOG_OVERHEAD;
 
 /**
  * RecordBatch implementation for magic 2 and above. The schema is given below:
@@ -307,6 +302,7 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
         if (count() == 0)
             return Collections.emptyIterator();
 
+        // 无压缩
         if (!isCompressed())
             return uncompressedIterator();
 
@@ -478,10 +474,13 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
         buffer.putShort(position + ATTRIBUTES_OFFSET, attributes);
         buffer.putLong(position + FIRST_TIMESTAMP_OFFSET, firstTimestamp);
         buffer.putLong(position + MAX_TIMESTAMP_OFFSET, maxTimestamp);
+        // 消息批中有多少条消息，和 RECORDS_COUNT_OFFSET 的值相同
         buffer.putInt(position + LAST_OFFSET_DELTA_OFFSET, lastOffsetDelta);
         buffer.putLong(position + PRODUCER_ID_OFFSET, producerId);
         buffer.putShort(position + PRODUCER_EPOCH_OFFSET, epoch);
+        // base sequence = 0
         buffer.putInt(position + BASE_SEQUENCE_OFFSET, sequence);
+        // 消息批中有多少条消息
         buffer.putInt(position + RECORDS_COUNT_OFFSET, numRecords);
         // 计算 && 设置 crc，crc 不包含 attribute 之前的数据
         long crc = Crc32C.compute(buffer, ATTRIBUTES_OFFSET, sizeInBytes - ATTRIBUTES_OFFSET);

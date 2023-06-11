@@ -66,6 +66,7 @@ public class FileLogInputStream implements LogInputStream<FileLogInputStream.Fil
             return null;
 
         logHeaderBuffer.rewind();
+        // 读取一个批次的消息头
         Utils.readFullyOrFail(channel, logHeaderBuffer, position, "log header");
 
         logHeaderBuffer.rewind();
@@ -90,6 +91,7 @@ public class FileLogInputStream implements LogInputStream<FileLogInputStream.Fil
         else
             batch = new DefaultFileChannelRecordBatch(offset, magic, fileRecords, position, size);
 
+        // position 加上当前批次的大小
         position += batch.sizeInBytes();
         return batch;
     }
@@ -204,6 +206,7 @@ public class FileLogInputStream implements LogInputStream<FileLogInputStream.Fil
             if (fullBatch != null)
                 return fullBatch;
 
+            // DefaultRecordBatch
             if (batchHeader == null)
                 batchHeader = loadBatchWithSize(headerSize(), "record batch header");
 

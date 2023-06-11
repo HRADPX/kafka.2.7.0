@@ -16,13 +16,6 @@
  */
 package org.apache.kafka.common.record;
 
-import static org.apache.kafka.common.utils.Utils.wrapNullable;
-
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.nio.ByteBuffer;
-
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.message.LeaderChangeMessage;
@@ -31,6 +24,13 @@ import org.apache.kafka.common.protocol.ObjectSerializationCache;
 import org.apache.kafka.common.protocol.types.Struct;
 import org.apache.kafka.common.utils.ByteBufferOutputStream;
 import org.apache.kafka.common.utils.Utils;
+
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+
+import static org.apache.kafka.common.utils.Utils.wrapNullable;
 
 /**
  * This class is used to write new log data in memory, i.e. this is the write path for {@link MemoryRecords}.
@@ -81,6 +81,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private float actualCompressionRatio = 1;
     private long maxTimestamp = RecordBatch.NO_TIMESTAMP;
     private long offsetOfMaxTimestamp = -1;
+    // 消息批次最后一条消息的偏移量，从 0 开始
     private Long lastOffset = null;
     private Long firstTimestamp = null;
 
@@ -371,6 +372,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
         int writtenCompressed = size - DefaultRecordBatch.RECORD_BATCH_OVERHEAD;
         // 生产者消息批 baseOffset = 0，lastOffset 是最后一个消息批的偏移量
         // 所以生产者的消息批的这个字段就是这个消息批有多少条记录
+        // 这个值等于 numRecords
         int offsetDelta = (int) (lastOffset - baseOffset);
 
         final long maxTimestamp;
@@ -541,6 +543,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
      * @param headers The record headers if there are any
      * @return CRC of the record or null if record-level CRC is not supported for the message format
      *
+     * 生产者写入消息 2
      * 对于生产者，其 offset 是相对偏移量，每个批次中的消息的偏移量都是从 0 开始，而服务端存储的绝对偏移量，所以
      * 在服务端这个偏移量需要转换为绝对偏移量进行存储。
      */
@@ -566,6 +569,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
      * @param value The record value
      * @param headers The record headers if there are any
      * @return CRC of the record or null if record-level CRC is not supported for the message format
+     * 生产者写入消息 1
      */
     public Long append(long timestamp, byte[] key, byte[] value, Header[] headers) {
         return append(timestamp, wrapNullable(key), wrapNullable(value), headers);
@@ -712,7 +716,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private void appendDefaultRecord(long offset, long timestamp, ByteBuffer key, ByteBuffer value,
                                      Header[] headers) throws IOException {
         ensureOpenForRecordAppend();
-        // 第一条消息 offsetDelta = 0
+        // 第一条消息 offsetDelta = 0，这个变量就是这个消息在消息批中的相对偏移量
         int offsetDelta = (int) (offset - baseOffset);
         long timestampDelta = timestamp - firstTimestamp;
         // 写消息，返回消息的长度
@@ -749,9 +753,11 @@ public class MemoryRecordsBuilder implements AutoCloseable {
             throw new IllegalArgumentException("Maximum offset delta exceeded, base offset: " + baseOffset +
                     ", last offset: " + offset);
 
+        // 最后会写到消息批的头信息中，表示该批消息有多少条记录
         numRecords += 1;
         // 当前消息批次除了 header 以外所有消息未压缩前的大小
         uncompressedRecordsSizeInBytes += size;
+        // 每次写入一条记录，lastOffset 就会自增，因为 offset = this.lastOffset == null ? this.baseOffset : lastOffset + 1
         lastOffset = offset;
 
         if (magic > RecordBatch.MAGIC_VALUE_V0 && timestamp > maxTimestamp) {
