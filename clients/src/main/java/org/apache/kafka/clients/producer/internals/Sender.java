@@ -345,6 +345,7 @@ public class Sender implements Runnable {
         Cluster cluster = metadata.fetch();
         // get the list of partitions with data ready to send
         // 2) 获取所有准备发送的分区，判断哪些 partition 有消息可以发送，获取 partition 的 leader partition 对应的 broker 主机
+        // 这里面有具体的条件来判断什么时候一个消息批次可以被发送
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
         // if there are any partitions whose leaders are not known yet, force metadata update
@@ -793,6 +794,7 @@ public class Sender implements Runnable {
         if (batches.isEmpty())
             return;
 
+        // key: topic, value: 消息批
         Map<TopicPartition, MemoryRecords> produceRecordsByPartition = new HashMap<>(batches.size());
         final Map<TopicPartition, ProducerBatch> recordsByPartition = new HashMap<>(batches.size());
 
@@ -805,6 +807,8 @@ public class Sender implements Runnable {
 
         for (ProducerBatch batch : batches) {
             TopicPartition tp = batch.topicPartition;
+            // ProducerBatch --> MemoryRecords，这个过程会把消息批的消息头填充（如消息批长度、偏移量、magic等）
+            // 将 MemoryRecords 中的 byteBuffer 中的预留字节填充成 DefaultRecordBatch 的消息头格式
             MemoryRecords records = batch.records();
 
             // down convert if necessary to the minimum magic used. In general, there can be a delay between the time
@@ -825,6 +829,7 @@ public class Sender implements Runnable {
             transactionalId = transactionManager.transactionalId();
         }
         // 构造生产者请求，最后封装为统一的客户端请求
+        // 发送到服务端最终消息格式是 （TopicPartition，MemoryRecords）映射
         ProduceRequest.Builder requestBuilder = ProduceRequest.Builder.forMagic(minUsedMagic, acks, timeout,
                 produceRecordsByPartition, transactionalId);
         // 回调函数，它会作为客户端请求的成员变量，当客户端请求完成时，会调用回调函数

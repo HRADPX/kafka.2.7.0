@@ -46,7 +46,8 @@ public class MemoryRecords extends AbstractRecords {
 
     private final ByteBuffer buffer;
 
-    // todo huangran 消息的格式
+    // DefaultRecordBatch
+    // 对于生产者而言，batches.size = 1
     private final Iterable<MutableRecordBatch> batches = this::batchIterator;
 
     private int validBytes = -1;

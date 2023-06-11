@@ -16,6 +16,13 @@
  */
 package org.apache.kafka.common.record;
 
+import static org.apache.kafka.common.utils.Utils.wrapNullable;
+
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.message.LeaderChangeMessage;
@@ -24,13 +31,6 @@ import org.apache.kafka.common.protocol.ObjectSerializationCache;
 import org.apache.kafka.common.protocol.types.Struct;
 import org.apache.kafka.common.utils.ByteBufferOutputStream;
 import org.apache.kafka.common.utils.Utils;
-
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.nio.ByteBuffer;
-
-import static org.apache.kafka.common.utils.Utils.wrapNullable;
 
 /**
  * This class is used to write new log data in memory, i.e. this is the write path for {@link MemoryRecords}.
@@ -75,6 +75,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private long producerId;
     private short producerEpoch;
     private int baseSequence;
+    // 当前消息批次除了 header 以外所有消息未压缩前的大小
     private int uncompressedRecordsSizeInBytes = 0; // Number of bytes (excluding the header) written before compression
     private int numRecords = 0;
     private float actualCompressionRatio = 1;
@@ -126,6 +127,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
         this.isControlBatch = isControlBatch;
         this.partitionLeaderEpoch = partitionLeaderEpoch;
         this.writeLimit = writeLimit;
+        // 0
         this.initialPosition = bufferStream.position();
         // 消息批的消息头占用的字节数
         this.batchHeaderSizeInBytes = AbstractRecords.recordBatchHeaderSizeInBytes(magic, compressionType);
@@ -205,6 +207,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
         if (aborted) {
             throw new IllegalStateException("Attempting to build an aborted record batch");
         }
+        // 转换为 MemoryRecords, 填充 header 信息
         close();
         return builtRecords;
     }
@@ -317,11 +320,14 @@ public class MemoryRecordsBuilder implements AutoCloseable {
 
         closeForRecordAppends();
 
+        // 无消息
         if (numRecords == 0L) {
             buffer().position(initialPosition);
             builtRecords = MemoryRecords.EMPTY;
         } else {
+            // 默认走这个分支
             if (magic > RecordBatch.MAGIC_VALUE_V1)
+                // 填充偏移量等一些消息批的基本信息
                 this.actualCompressionRatio = (float) writeDefaultBatchHeader() / this.uncompressedRecordsSizeInBytes;
             else if (compressionType != CompressionType.NONE)
                 this.actualCompressionRatio = (float) writeLegacyCompressedWrapperHeader() / this.uncompressedRecordsSizeInBytes;
@@ -357,9 +363,14 @@ public class MemoryRecordsBuilder implements AutoCloseable {
         ensureOpenForRecordBatchWrite();
         ByteBuffer buffer = bufferStream.buffer();
         int pos = buffer.position();
+        // initialPosition = 0，初始位置，重置 position 到数组的头部
         buffer.position(initialPosition);
+        // totalSize = batch header + message size，包括消息体和消息头
         int size = pos - initialPosition;
+        // message size，消息体的大小
         int writtenCompressed = size - DefaultRecordBatch.RECORD_BATCH_OVERHEAD;
+        // 生产者消息批 baseOffset = 0，lastOffset 是最后一个消息批的偏移量
+        // 所以生产者的消息批的这个字段就是这个消息批有多少条记录
         int offsetDelta = (int) (lastOffset - baseOffset);
 
         final long maxTimestamp;
@@ -368,10 +379,12 @@ public class MemoryRecordsBuilder implements AutoCloseable {
         else
             maxTimestamp = this.maxTimestamp;
 
+        // 写消息头
         DefaultRecordBatch.writeHeader(buffer, baseOffset, offsetDelta, size, magic, compressionType, timestampType,
                 firstTimestamp, maxTimestamp, producerId, producerEpoch, baseSequence, isTransactional, isControlBatch,
                 partitionLeaderEpoch, numRecords);
 
+        // 重置 position 到数组末尾
         buffer.position(pos);
         return writtenCompressed;
     }
@@ -419,6 +432,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
             if (firstTimestamp == null)
                 firstTimestamp = timestamp;
 
+            // 默认走 2.0
             if (magic > RecordBatch.MAGIC_VALUE_V1) {
                 appendDefaultRecord(offset, timestamp, key, value, headers);
                 return null;
@@ -526,6 +540,9 @@ public class MemoryRecordsBuilder implements AutoCloseable {
      * @param value The record value
      * @param headers The record headers if there are any
      * @return CRC of the record or null if record-level CRC is not supported for the message format
+     *
+     * 对于生产者，其 offset 是相对偏移量，每个批次中的消息的偏移量都是从 0 开始，而服务端存储的绝对偏移量，所以
+     * 在服务端这个偏移量需要转换为绝对偏移量进行存储。
      */
     public Long append(long timestamp, ByteBuffer key, ByteBuffer value, Header[] headers) {
         return appendWithOffset(nextSequentialOffset(), timestamp, key, value, headers);
@@ -695,8 +712,10 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private void appendDefaultRecord(long offset, long timestamp, ByteBuffer key, ByteBuffer value,
                                      Header[] headers) throws IOException {
         ensureOpenForRecordAppend();
+        // 第一条消息 offsetDelta = 0
         int offsetDelta = (int) (offset - baseOffset);
         long timestampDelta = timestamp - firstTimestamp;
+        // 写消息，返回消息的长度
         int sizeInBytes = DefaultRecord.writeTo(appendStream, offsetDelta, timestampDelta, key, value, headers);
         recordWritten(offset, timestamp, sizeInBytes);
     }
@@ -731,6 +750,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
                     ", last offset: " + offset);
 
         numRecords += 1;
+        // 当前消息批次除了 header 以外所有消息未压缩前的大小
         uncompressedRecordsSizeInBytes += size;
         lastOffset = offset;
 
@@ -797,6 +817,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
             return true;
 
         final int recordSize;
+        // 低于 2.0 版本，消息格式是 偏移量 + 长度
         if (magic < RecordBatch.MAGIC_VALUE_V2) {
             recordSize = Records.LOG_OVERHEAD + LegacyRecord.recordSize(magic, key, value);
         } else {
@@ -831,6 +852,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
         return magic;
     }
 
+    // 获取下一个 offset
     private long nextSequentialOffset() {
         return lastOffset == null ? baseOffset : lastOffset + 1;
     }

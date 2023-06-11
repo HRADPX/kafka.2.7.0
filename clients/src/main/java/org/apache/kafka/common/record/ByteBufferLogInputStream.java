@@ -16,14 +16,14 @@
  */
 package org.apache.kafka.common.record;
 
-import org.apache.kafka.common.errors.CorruptRecordException;
-
-import java.nio.ByteBuffer;
-
 import static org.apache.kafka.common.record.Records.HEADER_SIZE_UP_TO_MAGIC;
 import static org.apache.kafka.common.record.Records.LOG_OVERHEAD;
 import static org.apache.kafka.common.record.Records.MAGIC_OFFSET;
 import static org.apache.kafka.common.record.Records.SIZE_OFFSET;
+
+import java.nio.ByteBuffer;
+
+import org.apache.kafka.common.errors.CorruptRecordException;
 
 /**
  * A byte buffer backed log input stream. This class avoids the need to copy records by returning
@@ -39,16 +39,20 @@ class ByteBufferLogInputStream implements LogInputStream<MutableRecordBatch> {
     }
 
     public MutableRecordBatch nextBatch() {
+        // 字节数据有多少字节
         int remaining = buffer.remaining();
 
+        // 下一批占用的字节（包含 baseOffset 和 length 占用的字节数量）
         Integer batchSize = nextBatchSize();
         if (batchSize == null || remaining < batchSize)
             return null;
 
+        // magic
         byte magic = buffer.get(buffer.position() + MAGIC_OFFSET);
 
         ByteBuffer batchSlice = buffer.slice();
         batchSlice.limit(batchSize);
+        // 移动 position
         buffer.position(buffer.position() + batchSize);
 
         if (magic > RecordBatch.MAGIC_VALUE_V1)
@@ -65,8 +69,10 @@ class ByteBufferLogInputStream implements LogInputStream<MutableRecordBatch> {
      */
     Integer nextBatchSize() throws CorruptRecordException {
         int remaining = buffer.remaining();
+        // offset + batch size
         if (remaining < LOG_OVERHEAD)
             return null;
+        // 下一批次的消息的占用的字节大小
         int recordSize = buffer.getInt(buffer.position() + SIZE_OFFSET);
         // V0 has the smallest overhead, stricter checking is done later
         if (recordSize < LegacyRecord.RECORD_OVERHEAD_V0)
@@ -76,6 +82,7 @@ class ByteBufferLogInputStream implements LogInputStream<MutableRecordBatch> {
             throw new CorruptRecordException(String.format("Record size %d exceeds the largest allowable message size (%d).",
                     recordSize, maxMessageSize));
 
+        // 小于 17 （baseOffset + length + epoch + magic = 8 + 4 + 4 + 1）没有消息了
         if (remaining < HEADER_SIZE_UP_TO_MAGIC)
             return null;
 
@@ -83,6 +90,7 @@ class ByteBufferLogInputStream implements LogInputStream<MutableRecordBatch> {
         if (magic < 0 || magic > RecordBatch.CURRENT_MAGIC_VALUE)
             throw new CorruptRecordException("Invalid magic found in record: " + magic);
 
+        // 因为在计算消息批次大小的时候去掉了 baseOffset + length 占用的 12 个字节，这里加上
         return recordSize + LOG_OVERHEAD;
     }
 }

@@ -16,14 +16,7 @@
  */
 package org.apache.kafka.common.record;
 
-import org.apache.kafka.common.InvalidRecordException;
-import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.errors.CorruptRecordException;
-import org.apache.kafka.common.header.Header;
-import org.apache.kafka.common.utils.ByteBufferOutputStream;
-import org.apache.kafka.common.utils.ByteUtils;
-import org.apache.kafka.common.utils.CloseableIterator;
-import org.apache.kafka.common.utils.Crc32C;
+import static org.apache.kafka.common.record.Records.LOG_OVERHEAD;
 
 import java.io.DataInputStream;
 import java.io.EOFException;
@@ -37,7 +30,14 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 
-import static org.apache.kafka.common.record.Records.LOG_OVERHEAD;
+import org.apache.kafka.common.InvalidRecordException;
+import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.errors.CorruptRecordException;
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.utils.ByteBufferOutputStream;
+import org.apache.kafka.common.utils.ByteUtils;
+import org.apache.kafka.common.utils.CloseableIterator;
+import org.apache.kafka.common.utils.Crc32C;
 
 /**
  * RecordBatch implementation for magic 2 and above. The schema is given below:
@@ -49,7 +49,7 @@ import static org.apache.kafka.common.record.Records.LOG_OVERHEAD;
  *  Magic => Int8                      // magic
  *  CRC => Uint32                      // 校验数据
  *  Attributes => Int16
- *  LastOffsetDelta => Int32 // also serves as LastSequenceDelta
+ *  LastOffsetDelta => Int32 // also serves as LastSequenceDelta  (LastOffsetDelta - baseOffset) 就是该消息批中有多少条消息
  *  FirstTimestamp => Int64
  *  MaxTimestamp => Int64
  *  ProducerId => Int64
@@ -461,13 +461,20 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
         if (firstTimestamp < 0 && firstTimestamp != NO_TIMESTAMP)
             throw new IllegalArgumentException("Invalid message timestamp " + firstTimestamp);
 
+        // 计算 attribute，1个字节
         short attributes = computeAttributes(compressionType, timestampType, isTransactional, isControlBatch);
 
+        // position 已经重置为 0
         int position = buffer.position();
+        // baseOffset = 0
         buffer.putLong(position + BASE_OFFSET_OFFSET, baseOffset);
+        // 消息批的字节数（不包含其实偏移量和消息体的长度 -- 8 + 4）
         buffer.putInt(position + LENGTH_OFFSET, sizeInBytes - LOG_OVERHEAD);
+        // PartitionLeaderEpoch
         buffer.putInt(position + PARTITION_LEADER_EPOCH_OFFSET, partitionLeaderEpoch);
+        // magic
         buffer.put(position + MAGIC_OFFSET, magic);
+        // attribute
         buffer.putShort(position + ATTRIBUTES_OFFSET, attributes);
         buffer.putLong(position + FIRST_TIMESTAMP_OFFSET, firstTimestamp);
         buffer.putLong(position + MAX_TIMESTAMP_OFFSET, maxTimestamp);
@@ -476,8 +483,10 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
         buffer.putShort(position + PRODUCER_EPOCH_OFFSET, epoch);
         buffer.putInt(position + BASE_SEQUENCE_OFFSET, sequence);
         buffer.putInt(position + RECORDS_COUNT_OFFSET, numRecords);
+        // 计算 && 设置 crc，crc 不包含 attribute 之前的数据
         long crc = Crc32C.compute(buffer, ATTRIBUTES_OFFSET, sizeInBytes - ATTRIBUTES_OFFSET);
         buffer.putInt(position + CRC_OFFSET, (int) crc);
+        // 设置 position 到 RECORD_BATCH_OVERHEAD
         buffer.position(position + RECORD_BATCH_OVERHEAD);
     }
 

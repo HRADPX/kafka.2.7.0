@@ -403,6 +403,8 @@ public final class ByteUtils {
     /**
      * Number of bytes needed to encode an integer in variable-length format.
      *
+     * 编码 value 所需的字节数量，结果 1、2、4、8，对应 byte、short、int、long
+     * 负数需要 5 个字节
      * @param value The signed value
      */
     public static int sizeOfVarint(int value) {

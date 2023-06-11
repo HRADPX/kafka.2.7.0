@@ -16,6 +16,22 @@
  */
 package org.apache.kafka.common.requests;
 
+import static org.apache.kafka.common.protocol.CommonFields.NULLABLE_TRANSACTIONAL_ID;
+import static org.apache.kafka.common.protocol.CommonFields.PARTITION_ID;
+import static org.apache.kafka.common.protocol.CommonFields.TOPIC_NAME;
+import static org.apache.kafka.common.protocol.types.Type.INT16;
+import static org.apache.kafka.common.protocol.types.Type.INT32;
+import static org.apache.kafka.common.protocol.types.Type.RECORDS;
+
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
 import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.UnsupportedCompressionTypeException;
@@ -32,22 +48,6 @@ import org.apache.kafka.common.record.MutableRecordBatch;
 import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.utils.CollectionUtils;
 import org.apache.kafka.common.utils.Utils;
-
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-
-import static org.apache.kafka.common.protocol.CommonFields.NULLABLE_TRANSACTIONAL_ID;
-import static org.apache.kafka.common.protocol.CommonFields.PARTITION_ID;
-import static org.apache.kafka.common.protocol.CommonFields.TOPIC_NAME;
-import static org.apache.kafka.common.protocol.types.Type.INT16;
-import static org.apache.kafka.common.protocol.types.Type.INT32;
-import static org.apache.kafka.common.protocol.types.Type.RECORDS;
 
 public class ProduceRequest extends AbstractRequest {
     private static final String ACKS_KEY_NAME = "acks";
@@ -398,6 +398,7 @@ public class ProduceRequest extends AbstractRequest {
                     "use ZStandard compression");
             }
 
+            // 这里验证了一个生产者一次请求对一个分区的 MemoryRecords 只能包含一个记录批次
             if (iterator.hasNext())
                 throw new InvalidRecordException("Produce requests with version " + version + " are only allowed to " +
                     "contain exactly one record batch");

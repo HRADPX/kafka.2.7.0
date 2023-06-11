@@ -94,6 +94,9 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
    * @return The offset found and the corresponding file position for this offset
    *         If the target offset is smaller than the least entry in the index (or the index is empty),
    *         the pair (baseOffset, 0) is returned.
+   *
+   * 比如偏移量 (targetOffset)是 350， 索引文件(起始偏移量,磁盘的物理位置)为: (0, 100),(100,320),(200,690),(300,1000),(400,1230)
+   * 那么它返回的就是 (300,1000)，即索引定位到偏移量为 300 的物理地址，下面会从物理地址为 1000 开始向后遍历，直到找到绝对偏移量为 350 的消息。
    */
   def lookup(targetOffset: Long): OffsetPosition = {
     maybeLock(lock) {

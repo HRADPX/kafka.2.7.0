@@ -16,15 +16,7 @@
  */
 package org.apache.kafka.common.record;
 
-import org.apache.kafka.common.InvalidRecordException;
-import org.apache.kafka.common.header.Header;
-import org.apache.kafka.common.header.internals.RecordHeader;
-import org.apache.kafka.common.utils.ByteUtils;
-import org.apache.kafka.common.utils.Checksums;
-import org.apache.kafka.common.utils.Crc32C;
-import org.apache.kafka.common.utils.PrimitiveRef;
-import org.apache.kafka.common.utils.PrimitiveRef.IntRef;
-import org.apache.kafka.common.utils.Utils;
+import static org.apache.kafka.common.record.RecordBatch.MAGIC_VALUE_V2;
 
 import java.io.DataInput;
 import java.io.DataOutputStream;
@@ -35,7 +27,15 @@ import java.util.Arrays;
 import java.util.Objects;
 import java.util.zip.Checksum;
 
-import static org.apache.kafka.common.record.RecordBatch.MAGIC_VALUE_V2;
+import org.apache.kafka.common.InvalidRecordException;
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.header.internals.RecordHeader;
+import org.apache.kafka.common.utils.ByteUtils;
+import org.apache.kafka.common.utils.Checksums;
+import org.apache.kafka.common.utils.Crc32C;
+import org.apache.kafka.common.utils.PrimitiveRef;
+import org.apache.kafka.common.utils.PrimitiveRef.IntRef;
+import org.apache.kafka.common.utils.Utils;
 
 /**
  * This class implements the inner record format for magic 2 and above. The schema is as follows:
@@ -175,6 +175,21 @@ public class DefaultRecord implements Record {
 
     /**
      * Write the record to `out` and return its size.
+     * Length => Varint
+     * Attributes => Int8
+     * TimestampDelta => Varlong
+     * OffsetDelta => Varint
+     * Key => Bytes
+     * Value => Bytes
+     *
+     * 消息格式
+     *  消息长度: 可变(整个消息的长度)
+     *  Attribute: 1字节
+     *  TimestampDelta: 可变
+     *  OffsetDelta: 可变
+     *  key:
+     *
+     * @see DefaultRecord
      */
     public static int writeTo(DataOutputStream out,
                               int offsetDelta,
@@ -182,15 +197,20 @@ public class DefaultRecord implements Record {
                               ByteBuffer key,
                               ByteBuffer value,
                               Header[] headers) throws IOException {
+        // 消息体的字节数
         int sizeInBytes = sizeOfBodyInBytes(offsetDelta, timestampDelta, key, value, headers);
+        // 将消息体的长度写入消息中
         ByteUtils.writeVarint(sizeInBytes, out);
 
+        // 默认 attributes 占一个字节
         byte attributes = 0; // there are no used record attributes at the moment
         out.write(attributes);
 
+        // 写入 timestampDelta 和 offsetDelta
         ByteUtils.writeVarlong(timestampDelta, out);
         ByteUtils.writeVarint(offsetDelta, out);
 
+        // 写入 key
         if (key == null) {
             ByteUtils.writeVarint(-1, out);
         } else {
@@ -199,6 +219,7 @@ public class DefaultRecord implements Record {
             Utils.writeTo(out, key, keySize);
         }
 
+        // 写入 value
         if (value == null) {
             ByteUtils.writeVarint(-1, out);
         } else {
@@ -210,8 +231,10 @@ public class DefaultRecord implements Record {
         if (headers == null)
             throw new IllegalArgumentException("Headers cannot be null");
 
+        // 写入 headers 长度
         ByteUtils.writeVarint(headers.length, out);
 
+        // 写入 headers
         for (Header header : headers) {
             String headerKey = header.key();
             if (headerKey == null)
@@ -230,6 +253,7 @@ public class DefaultRecord implements Record {
             }
         }
 
+        // 返回这个消息的长度
         return ByteUtils.sizeOfVarint(sizeInBytes) + sizeInBytes;
     }
 
@@ -577,25 +601,27 @@ public class DefaultRecord implements Record {
                                          ByteBuffer value,
                                          Header[] headers) {
 
-        int keySize = key == null ? -1 : key.remaining();
-        int valueSize = value == null ? -1 : value.remaining();
+        int keySize = key == null ? -1 : key.remaining();       // keySize
+        int valueSize = value == null ? -1 : value.remaining(); // valueSize
         return sizeOfBodyInBytes(offsetDelta, timestampDelta, keySize, valueSize, headers);
     }
 
+    // 消息体是由 key、value 以及 headers 组成，默认 headers 为 null
     private static int sizeOfBodyInBytes(int offsetDelta,
                                          long timestampDelta,
                                          int keySize,
                                          int valueSize,
                                          Header[] headers) {
         int size = 1; // always one byte for attributes
-        size += ByteUtils.sizeOfVarint(offsetDelta);
-        size += ByteUtils.sizeOfVarlong(timestampDelta);
-        size += sizeOf(keySize, valueSize, headers);
+        size += ByteUtils.sizeOfVarint(offsetDelta);        // 编码 offsetDelta 需要多少字节
+        size += ByteUtils.sizeOfVarlong(timestampDelta);    // 编码 timestampDelta 需要多少字节
+        size += sizeOf(keySize, valueSize, headers);        // key、value、headers 一共多少字节
         return size;
     }
 
     private static int sizeOf(int keySize, int valueSize, Header[] headers) {
         int size = 0;
+        // 不设置 key 默认用 5 个字节保存
         if (keySize < 0)
             size += NULL_VARINT_SIZE_BYTES;
         else
@@ -609,6 +635,7 @@ public class DefaultRecord implements Record {
         if (headers == null)
             throw new IllegalArgumentException("Headers cannot be null");
 
+        // 保存 headers
         size += ByteUtils.sizeOfVarint(headers.length);
         for (Header header : headers) {
             String headerKey = header.key();
