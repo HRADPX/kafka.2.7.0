@@ -1773,8 +1773,10 @@ class Log(@volatile private var _dir: File,
   private def deleteOldSegments(predicate: (LogSegment, Option[LogSegment]) => Boolean,
                                 reason: SegmentDeletionReason): Int = {
     lock synchronized {
+      // deletable 返回需要删除的所有分段
       val deletable = deletableSegments(predicate)
       if (deletable.nonEmpty)
+        // 真正删除分段的逻辑
         deleteSegments(deletable, reason)
       else
         0
@@ -1786,6 +1788,7 @@ class Log(@volatile private var _dir: File,
       val numToDelete = deletable.size
       if (numToDelete > 0) {
         // we must always have at least one segment, so if we are going to delete all the segments, create a new one first
+        // 至少要保留一个分段，如果要删除所有的分段，需要先创建一个，但是通常不会
         if (segments.size == numToDelete)
           roll()
         lock synchronized {
@@ -1815,16 +1818,22 @@ class Log(@volatile private var _dir: File,
     if (segments.isEmpty) {
       Seq.empty
     } else {
+      // 存储要删除的 Segment
       val deletable = ArrayBuffer.empty[LogSegment]
       var segmentEntry = segments.firstEntry
+      // 遍历每个 Segment
       while (segmentEntry != null) {
         val segment = segmentEntry.getValue
+        // 获取下一个分段
         val nextSegmentEntry = segments.higherEntry(segmentEntry.getKey)
         val (nextSegment, upperBoundOffset, isLastSegmentAndEmpty) = if (nextSegmentEntry != null)
           (nextSegmentEntry.getValue, nextSegmentEntry.getValue.baseOffset, false)
         else
           (null, logEndOffset, segment.size == 0)
 
+        // HW 必须大于下一个分段的起始偏移量（upperBoundOffset），表示已经这个分段的所有记录都已经提交了
+        // 传入的清理策略，如时间、大小等
+        // isLastSegmentAndEmpty 最后一个分段不能删除
         if (highWatermark >= upperBoundOffset && predicate(segment, Option(nextSegment)) && !isLastSegmentAndEmpty) {
           deletable += segment
           segmentEntry = nextSegmentEntry
@@ -1844,6 +1853,7 @@ class Log(@volatile private var _dir: File,
    */
   def deleteOldSegments(): Int = {
     if (config.delete) {
+      // 根据时间删除 + 根据大小 + 偏移量是否违法
       deleteRetentionMsBreachedSegments() + deleteRetentionSizeBreachedSegments() + deleteLogStartOffsetBreachedSegments()
     } else {
       deleteLogStartOffsetBreachedSegments()
@@ -1863,9 +1873,15 @@ class Log(@volatile private var _dir: File,
   }
 
   // 根据文件大小删除
+  // 如需要保留 25，当前 4 个分段，分别为 30，30，20，20，那么它只会将前两个删除了，因为删除第 3 个后剩余的就不满足大于等于 25 的条件了
   private def deleteRetentionSizeBreachedSegments(): Int = {
+    // size 是当前 Log 所有 Segment 的大小
+    // config.retentionSize 默认是 -1，表示不根据大小策略来进行日志清理
     if (config.retentionSize < 0 || size < config.retentionSize) return 0
+    // 要删除的总大小 = 总大小 - 要保留的大小
     var diff = size - config.retentionSize
+    // segment 判断这个分段是否需要删除
+    // 删除的策略是一直删除到剩余的大小不小于配置的大小
     def shouldDelete(segment: LogSegment, nextSegmentOpt: Option[LogSegment]): Boolean = {
       if (diff - segment.size >= 0) {
         diff -= segment.size
@@ -1878,8 +1894,10 @@ class Log(@volatile private var _dir: File,
     deleteOldSegments(shouldDelete, RetentionSizeBreach)
   }
 
+  // 删除返回规则的分段（下一个分段的 baseOffset 必须大于日志对象的 logStartOffset
   private def deleteLogStartOffsetBreachedSegments(): Int = {
     def shouldDelete(segment: LogSegment, nextSegmentOpt: Option[LogSegment]): Boolean = {
+      // nextSegment.baseOffset <= Log.logStartOffset
       nextSegmentOpt.exists(_.baseOffset <= logStartOffset)
     }
 
@@ -2058,6 +2076,13 @@ class Log(@volatile private var _dir: File,
    * Flush log segments for all offsets up to offset-1
    *
    * @param offset The offset to flush up to (non-inclusive); the new recovery point
+   * 触发刷新日志的场景：
+   *  1）创建新的 Segment，会立即刷新旧的日志分段
+   *  2）日志中未刷新的消息数量超过 log.flush.interval.messages 配置的值（默认不刷新，由 OS 决定刷新时机）
+   *  3）刷新日志定时任务（默认不刷新，由 OS 决定刷新时机）
+   *
+   *  刷新日志方法的参数是日志的最新偏移量（logEndOffset），它要和日志中现有的检查点位置（recoveryPoint）比较，只有最新偏移量比检查点大，
+   *  才需要刷新，完成刷新后，更新检查点的位置。
    */
   def flush(offset: Long): Unit = {
     maybeHandleIOException(s"Error while flushing log for $topicPartition in dir ${dir.getParent} with offset $offset") {
@@ -2072,6 +2097,7 @@ class Log(@volatile private var _dir: File,
       lock synchronized {
         checkIfMemoryMappedBufferClosed()
         if (offset > this.recoveryPoint) {
+          // 更新检查点的位置
           this.recoveryPoint = offset
           lastFlushedTime.set(time.milliseconds)
         }

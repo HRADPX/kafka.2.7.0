@@ -295,7 +295,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
         /* start log manager */
         // 初始化 LogManager，包括解析&创建日志文件目录，并将分区（日志文件）和 Log 的映射保存到 LogManager 中
         logManager = LogManager(config, initialOfflineDirs, zkClient, brokerState, kafkaScheduler, time, brokerTopicStats, logDirFailureChannel)
-        // 启动 logManager
+        // 启动 logManager，开启若干个后台线程定时执行相关操作，如日志清理策略、刷新磁盘缓存等
         logManager.startup()
 
         metadataCache = new MetadataCache(config.brokerId)

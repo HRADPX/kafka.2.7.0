@@ -70,6 +70,7 @@ class LogManager(logDirs: Seq[File],
   val InitialTaskDelayMs = 30 * 1000
 
   private val logCreationOrDeletionLock = new Object
+  // 保存分区和日志的映射关系
   private val currentLogs = new Pool[TopicPartition, Log]()
   // Future logs are put in the directory with "-future" suffix. Future log is created when user wants to move replica
   // from one log directory to another log directory on the same broker. The directory of the future log will be renamed
@@ -79,7 +80,7 @@ class LogManager(logDirs: Seq[File],
   // Each element in the queue contains the log object to be deleted and the time it is scheduled for deletion.
   private val logsToBeDeleted = new LinkedBlockingQueue[(Log, Long)]()
 
-  /* 创建在配置文件里配置的目录 */
+  /* 创建在配置文件里配置的目录，这是数据目录，一个数据目录下可以有多个日志目录，一个日志目录对应一个分区 */
   private val _liveLogDirs: ConcurrentLinkedQueue[File] = createAndValidateLogDirs(logDirs, initialOfflineDirs)
   @volatile private var _currentDefaultConfig = initialDefaultConfig
   @volatile private var numRecoveryThreadsPerDataDir = recoveryThreadsPerDataDir
@@ -110,6 +111,7 @@ class LogManager(logDirs: Seq[File],
   @volatile private var logStartOffsetCheckpoints = liveLogDirs.map(dir =>
     (dir, new OffsetCheckpointFile(new File(dir, LogStartOffsetCheckpointFile), logDirFailureChannel))).toMap
 
+  // 分区和日志目录的映射
   private val preferredLogDirs = new ConcurrentHashMap[TopicPartition, String]()
 
   private def offlineLogDirs: Iterable[File] = {
@@ -118,7 +120,7 @@ class LogManager(logDirs: Seq[File],
     logDirsSet
   }
 
-  /* */
+  /* 创建 LogManager 时加载所有的日志 */
   loadLogs()
 
   private[kafka] val cleaner: LogCleaner =
@@ -305,6 +307,8 @@ class LogManager(logDirs: Seq[File],
 
   /**
    * Recover and load all logs in the given data directories
+   * 在创建 LogManager 时，会首先创建配置文件中配置的数据目录，然后为每个数据目录创建一个线程池来并行的加载各个分区的 Log 对象
+   * 完成加载后将分区和 Log 对象的映射关系保存起来。
    */
   private def loadLogs(): Unit = {
     info(s"Loading logs from log dirs $liveLogDirs")
@@ -314,11 +318,12 @@ class LogManager(logDirs: Seq[File],
     val jobs = mutable.Map.empty[File, Seq[Future[_]]]
     var numTotalLogs = 0
 
-    // 遍历所有配置的目录
+    // 遍历所有配置的目录，到这里所有的数据目录都已经创建
     for (dir <- liveLogDirs) {
       val logDirAbsolutePath = dir.getAbsolutePath
       try {
         // 为每个目录都创建一个线程池，后面会启动线程池里的线程去加载 Log
+        // 因为加载的过程比较慢，所以这里使用了线程池来并行
         val pool = Executors.newFixedThreadPool(numRecoveryThreadsPerDataDir)
         threadPools.append(pool)
 
@@ -377,6 +382,7 @@ class LogManager(logDirs: Seq[File],
           runnable
         }
 
+        // 提交任务
         jobs(cleanShutdownFile) = jobsForDir.map(pool.submit)
       } catch {
         case e: IOException =>
@@ -387,6 +393,7 @@ class LogManager(logDirs: Seq[File],
 
     try {
       for ((cleanShutdownFile, dirJobs) <- jobs) {
+        // 等待所有线程处理结束
         dirJobs.foreach(_.get)
         try {
           cleanShutdownFile.delete()
@@ -419,6 +426,8 @@ class LogManager(logDirs: Seq[File],
     if (scheduler != null) {
       info("Starting log cleanup with a period of %d ms.".format(retentionCheckMs))
       // 定时检查文件，清理超时文件，Kafka 的日志文件是有生命周期的
+      // 时间策略：默认保留7天的日志消息
+      // 大小策略：超过某个大小后，多余的数据会被删除
       scheduler.schedule("kafka-log-retention",
                          cleanupLogs _,
                          delay = InitialTaskDelayMs,
@@ -804,9 +813,10 @@ class LogManager(logDirs: Seq[File],
           if (isFuture)
             Log.logFutureDirName(topicPartition)
           else
-            Log.logDirName(topicPartition)
+            Log.logDirName(topicPartition)      // 目录名：topic_partitionNumber
         }
 
+        // 日志目录
         val logDir = logDirs
           .iterator // to prevent actually mapping the whole list, lazy map
           .map(createLogDirectory(_, logDirName))
@@ -815,6 +825,7 @@ class LogManager(logDirs: Seq[File],
           .get // If Failure, will throw
 
         val config = loadConfig()
+        // 创建 log
         val log = Log(
           dir = logDir,
           config = config,
@@ -827,6 +838,7 @@ class LogManager(logDirs: Seq[File],
           brokerTopicStats = brokerTopicStats,
           logDirFailureChannel = logDirFailureChannel)
 
+        // 保存分区和 log 的映射
         if (isFuture)
           futureLogs.put(topicPartition, log)
         else
