@@ -25,6 +25,7 @@ import org.apache.kafka.common.TopicPartition
 class Replica(val brokerId: Int, val topicPartition: TopicPartition) extends Logging {
   // the log end offset value, kept in all replicas;
   // for local replica it is the log's end offset, for remote replicas its value is only updated by follower fetch
+  // LEO: 偏移量元数据
   @volatile private[this] var _logEndOffsetMetadata = LogOffsetMetadata.UnknownOffsetMetadata
   // the log start offset value, kept in all replicas;
   // for local replica it is the log's start offset, for remote replicas its value is only updated by follower fetch

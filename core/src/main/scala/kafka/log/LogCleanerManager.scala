@@ -168,19 +168,24 @@ private[log] class LogCleanerManager(val logDirs: Seq[File],
     inLock(lock) {
       val now = time.milliseconds
       this.timeOfLastRun = now
+      // 所有的清理点检查文件
       val lastClean = allCleanerCheckpoints
       val dirtyLogs = logs.filter {
+        // 清理策略需要去重，默认是删除
         case (_, log) => log.config.compact  // match logs that are marked as compacted
       }.filterNot {
         case (topicPartition, log) =>
           // skip any logs already in-progress and uncleanable partitions
+          // 跳过正在清理和不需要清理的分区
           inProgress.contains(topicPartition) || isUncleanablePartition(log, topicPartition)
       }.map {
         case (topicPartition, log) => // create a LogToClean instance for each
           try {
+            // 上次的清理的位置
             val lastCleanOffset = lastClean.get(topicPartition)
             val offsetsToClean = cleanableOffsets(log, lastCleanOffset, now)
             // update checkpoint for logs with invalid checkpointed offsets
+            // 更新清理点检查文件
             if (offsetsToClean.forceUpdateCheckpoint)
               updateCheckpoints(log.parentDirFile, partitionToUpdateOrAdd = Option(topicPartition, offsetsToClean.firstDirtyOffset))
             val compactionDelayMs = maxCompactionDelay(log, offsetsToClean.firstDirtyOffset, now)
@@ -203,6 +208,7 @@ private[log] class LogCleanerManager(val logDirs: Seq[File],
       } else {
         preCleanStats.recordCleanablePartitions(cleanableLogs.size)
         val filthiest = cleanableLogs.max
+        // 放到处理集合中
         inProgress.put(filthiest.topicPartition, LogCleaningInProgress)
         Some(filthiest)
       }
@@ -568,6 +574,7 @@ private[log] object LogCleanerManager extends Logging {
     // If the log segments are abnormally truncated and hence the checkpointed offset is no longer valid;
     // reset to the log starting offset and log the error
     val (firstDirtyOffset, forceUpdateCheckpoint) = {
+      // 日志的 startOffset
       val logStartOffset = log.logStartOffset
       val checkpointDirtyOffset = lastCleanOffset.getOrElse(logStartOffset)
 

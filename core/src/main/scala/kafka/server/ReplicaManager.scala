@@ -188,6 +188,10 @@ object ReplicaManager {
 
 /**
  * 管理一台服务器上所有的副本
+ *  副本管理并不负责创建日志，它只是管理消息代理节点上的分区。所以，副本管理器将日志管理器这个全局的成员变量，传给了它所管理的每个分区。
+ * 副本管理器的每个分区通过日志管理器，为每个副本创建对应的日志。
+ *
+ * 同一个分区在多个消息代理节点上、一个分区管理多个副本都属于逻辑层；每个消息代理节点上的本地副本都有一个日志文件，属于物理层。
  */
 class ReplicaManager(val config: KafkaConfig,
                      metrics: Metrics,
@@ -642,6 +646,7 @@ class ReplicaManager(val config: KafkaConfig,
             case (topicPartition, result) =>
               val requestKey = TopicPartitionOperationKey(topicPartition)
               result.info.leaderHwChange match {
+                  // 分区高水位发生变化
                 case LeaderHwChange.Increased =>
                   // some delayed operations may be unblocked after HW changed
                   delayedProducePurgatory.checkAndComplete(requestKey)
@@ -659,9 +664,13 @@ class ReplicaManager(val config: KafkaConfig,
       recordConversionStatsCallback(localProduceResults.map { case (k, v) => k -> v.info.recordConversionStats })
 
       // 这里会判断 acks 是否为 -1，表示写完 leader partition 后还需要同步到 follower partition，还不能直接返回响应给客户端
+      // 但是这里不会阻塞方式等待返回，这样会对服务端的性能影响较大，Kafka 针对这种情况需要延迟返回响应结果。当 follower 节点完成
+      // 同步后，会触发延迟操作将响应返回给客户端
       if (delayedProduceRequestRequired(requiredAcks, entriesPerPartition, localProduceResults)) {
         // create delayed produce operation
         val produceMetadata = ProduceMetadata(requiredAcks, produceStatus)
+        // 延迟生产，ISR 的所有备份副本都向主副本发送了应答 todo tryCompleted
+        // 服务端处理备份副本的拉取请求，向主副本的本地日志读取消息后，会尝试完成延迟生产
         val delayedProduce = new DelayedProduce(timeout, produceMetadata, this, responseCallback, delayedProduceLock)
 
         // create a list of (topic, partition) pairs to use as keys for this delayed produce operation
@@ -675,6 +684,8 @@ class ReplicaManager(val config: KafkaConfig,
 
       } else {
         // we can respond immediately
+        // 如果是 1 或 0 在存储到日志后可以立即返回
+        // 如果是 0 应该不需要服务端存储到磁盘，在生产端发送后应该就会有消息立即返回
         val produceResponseStatus = produceStatus.map { case (k, status) => k -> status.responseStatus }
         responseCallback(produceResponseStatus)
       }
@@ -911,16 +922,16 @@ class ReplicaManager(val config: KafkaConfig,
   }
 
   // If all the following conditions are true, we need to put a delayed produce request and wait for replication to complete
-  //
+  // 延迟返回的三个条件
   // 1. required acks = -1
   // 2. there is data to append
   // 3. at least one partition append was successful (fewer errors than partitions)
   private def delayedProduceRequestRequired(requiredAcks: Short,
                                             entriesPerPartition: Map[TopicPartition, MemoryRecords],
                                             localProduceResults: Map[TopicPartition, LogAppendResult]): Boolean = {
-    requiredAcks == -1 &&
-    entriesPerPartition.nonEmpty &&
-    localProduceResults.values.count(_.exception.isDefined) < entriesPerPartition.size
+    requiredAcks == -1 &&                                                                     // ack = -1
+    entriesPerPartition.nonEmpty &&                                                           // 生产者发送的消息有数据
+    localProduceResults.values.count(_.exception.isDefined) < entriesPerPartition.size        // 至少要有一个分区写入到主副本的本地日志成功
   }
 
   private def isValidRequiredAcks(requiredAcks: Short): Boolean = {
@@ -1085,10 +1096,11 @@ class ReplicaManager(val config: KafkaConfig,
       logReadResultMap.put(topicPartition, logReadResult)
     }
 
-    // respond immediately if 1) fetch request does not want to wait
-    //                        2) fetch request does not require any data
-    //                        3) has enough data to respond
-    //                        4) some error happens while reading data
+    // 返回拉取结果给客户端
+    // respond immediately if 1) fetch request does not want to wait              拉取请求没有设置等待时间
+    //                        2) fetch request does not require any data          拉取请求要有拉取分区
+    //                        3) has enough data to respond                       本次拉取收集到足够的数据
+    //                        4) some error happens while reading data            拉取分区时发生错误
     //                        5) we found a diverging epoch
     if (timeout <= 0 || fetchInfos.isEmpty || bytesReadable >= fetchMinBytes || errorReadingData || hasDivergingEpoch) {
       val fetchPartitionData = logReadResults.map { case (tp, result) =>
@@ -1121,7 +1133,7 @@ class ReplicaManager(val config: KafkaConfig,
       }
       val fetchMetadata: SFetchMetadata = SFetchMetadata(fetchMinBytes, fetchMaxBytes, hardMaxBytesLimit,
         fetchOnlyFromLeader, fetchIsolation, isFromFollower, replicaId, fetchPartitionStatus)
-      // 封装了一个延迟调度任务
+      // 封装了一个延迟拉取
       val delayedFetch = new DelayedFetch(timeout, fetchMetadata, this, quota, clientMetadata,
         responseCallback)
 

@@ -95,12 +95,12 @@ import kafka.coordinator.group.GroupOverview
 /**
  * Logic to handle the various Kafka requests
  */
-class KafkaApis(val requestChannel: RequestChannel,
-                val replicaManager: ReplicaManager,
+class KafkaApis(val requestChannel: RequestChannel,           // 请求通道
+                val replicaManager: ReplicaManager,           // 副本管理器
                 val adminManager: AdminManager,
-                val groupCoordinator: GroupCoordinator,
+                val groupCoordinator: GroupCoordinator,       // 协调者
                 val txnCoordinator: TransactionCoordinator,
-                val controller: KafkaController,
+                val controller: KafkaController,              // 控制器
                 val zkClient: KafkaZkClient,
                 val brokerId: Int,
                 val config: KafkaConfig,

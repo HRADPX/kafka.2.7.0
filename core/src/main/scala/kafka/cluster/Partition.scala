@@ -273,6 +273,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
   def partitionId: Int = topicPartition.partition
 
   private val stateChangeLogger = new StateChangeLogger(localBrokerId, inControllerContext = false, None)
+  // 分区远程副本（分区创建的副本分为 本地副本和远程副本），远程副本没有日志文件
   private val remoteReplicasMap = new Pool[Int, Replica]
   // The read lock is only required when multiple reads are executed and needs to be in a consistent manner
   private val leaderIsrUpdateLock = new ReentrantReadWriteLock
@@ -284,7 +285,9 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
   // start offset for 'leaderEpoch' above (leader epoch of the current leader for this partition),
   // defined when this broker is leader for partition
   @volatile private var leaderEpochStartOffsetOpt: Option[Long] = None
+  // 主副本所在的消息节点编号
   @volatile var leaderReplicaIdOpt: Option[Int] = None
+  // 同步的副本 isr
   @volatile private[cluster] var isrState: IsrState = CommittedIsr(Set.empty)
   @volatile var assignmentState: AssignmentState = SimpleAssignmentState(Seq.empty)
 

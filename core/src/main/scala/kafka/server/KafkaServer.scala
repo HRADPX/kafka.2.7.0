@@ -313,7 +313,7 @@ class KafkaServer(val config: KafkaConfig, time: Time = Time.SYSTEM, threadNameP
 
         /* start replica manager */
         brokerToControllerChannelManager = new BrokerToControllerChannelManagerImpl(metadataCache, time, metrics, config, threadNamePrefix)
-        // 服务副本管理器（LogManager）
+        // 创建并启动服务副本管理器（LogManager）
         replicaManager = createReplicaManager(isShuttingDown)
         replicaManager.startup()
         brokerToControllerChannelManager.start()

@@ -110,6 +110,7 @@ class LogCleaner(initialConfig: CleanerConfig,
                                         "bytes",
                                         time = time)
 
+  // 一个日志清理管理器和多个清理器线程
   private[log] val cleaners = mutable.ArrayBuffer[CleanerThread]()
 
   /**
@@ -154,6 +155,7 @@ class LogCleaner(initialConfig: CleanerConfig,
     (0 until config.numThreads).foreach { i =>
       val cleaner = new CleanerThread(i)
       cleaners += cleaner
+      // 启动清理器线程
       cleaner.start()
     }
   }
@@ -295,6 +297,8 @@ class LogCleaner(initialConfig: CleanerConfig,
     if (config.dedupeBufferSize / config.numThreads > Int.MaxValue)
       warn("Cannot use more than 2G of cleaner buffer space per cleaner thread, ignoring excess buffer space...")
 
+    // 每个清理器线程都有一个清理器，每个线程每次运行时只清理一个日志
+    // 清理逻辑在 doWork 方法中
     val cleaner = new Cleaner(id = threadId,
                               offsetMap = new SkimpyOffsetMap(memory = math.min(config.dedupeBufferSize / config.numThreads, Int.MaxValue).toInt,
                                                               hashAlgorithm = config.hashAlgorithm),
@@ -343,6 +347,7 @@ class LogCleaner(initialConfig: CleanerConfig,
     @throws(classOf[LogCleaningException])
     private def cleanFilthiestLog(): Boolean = {
       val preCleanStats = new PreCleanStats()
+      // 选择一个最需要清理的日志（需要清理的字节/总字节的值最大）
       val cleaned = cleanerManager.grabFilthiestCompactedLog(time, preCleanStats) match {
         case None =>
           false
@@ -350,6 +355,7 @@ class LogCleaner(initialConfig: CleanerConfig,
           // there's a log, clean it
           this.lastPreCleanStats = preCleanStats
           try {
+            // 清理
             cleanLog(cleanable)
             true
           } catch {
@@ -1072,9 +1078,13 @@ private case class LogToClean(topicPartition: TopicPartition,
                               firstDirtyOffset: Long,
                               uncleanableOffset: Long,
                               needCompactionNow: Boolean = false) extends Ordered[LogToClean] {
+  // 日志尾部的大小（日志分段的开始位置到日志检查点的位置）
   val cleanBytes = log.logSegments(-1, firstDirtyOffset).map(_.size.toLong).sum
+  //
   val (firstUncleanableOffset, cleanableBytes) = LogCleanerManager.calculateCleanableBytes(log, firstDirtyOffset, uncleanableOffset)
+  // 计算总大小（日志头部+尾部）
   val totalBytes = cleanBytes + cleanableBytes
+  // 计算 cleanableRatio
   val cleanableRatio = cleanableBytes / totalBytes.toDouble
   override def compare(that: LogToClean): Int = math.signum(this.cleanableRatio - that.cleanableRatio).toInt
 }
