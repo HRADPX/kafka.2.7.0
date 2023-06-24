@@ -92,6 +92,7 @@ class DelayedProduce(delayMs: Long,
             (false, err)
 
           case Right(partition) =>
+            // 检查分区是否有足够的副本
             partition.checkEnoughReplicasReachOffset(status.requiredOffset)
         }
 
@@ -104,6 +105,7 @@ class DelayedProduce(delayMs: Long,
     }
 
     // check if every partition has satisfied at least one of case A or B
+    // 只要还有一个分区的 acksPending 为 true，尝试完成返回 false
     if (!produceMetadata.produceStatus.values.exists(_.acksPending))
       forceComplete()
     else

@@ -26,6 +26,10 @@ class Replica(val brokerId: Int, val topicPartition: TopicPartition) extends Log
   // the log end offset value, kept in all replicas;
   // for local replica it is the log's end offset, for remote replicas its value is only updated by follower fetch
   // LEO: 偏移量元数据
+  // 这个偏移量需要和日志对象（Log）的偏移量区分，消息追加到主副本的本地日志会更新日志的下一个偏移量元数据（nextOffsetMetadata）
+  // 但是不是副本的偏移量元数据。
+  // 这个偏移量只有在备份副本向主副本发起拉起数据的请求时，主副本所在的副本管理器会更新备份副本的偏移量数据
+  /** [[kafka.server.ReplicaManager.fetchMessages]] */
   @volatile private[this] var _logEndOffsetMetadata = LogOffsetMetadata.UnknownOffsetMetadata
   // the log start offset value, kept in all replicas;
   // for local replica it is the log's start offset, for remote replicas its value is only updated by follower fetch

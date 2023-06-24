@@ -365,6 +365,8 @@ class Log(@volatile private var _dir: File,
    *
    * @param hw the suggested new value for the high watermark
    * @return the updated high watermark offset
+   *
+   * 更新高水位的值，通常在初始化或者 follower 节点从 leader 节点拉取到数据时调用
    */
   def updateHighWatermark(hw: Long): Long = {
     val newHighWatermark = if (hw < logStartOffset)

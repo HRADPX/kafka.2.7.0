@@ -735,6 +735,14 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
         }
 
         // some delayed operations may be unblocked after HW or LW changed
+        // 尝试完成延迟生产，如果生产者客户端设置了 ack = -1，则主副本必须等待 ISR 的所有备份副本都向主副本发送了应答后，
+        // 服务端才会返回响应给客户端。服务端完成延迟生产的外部触发事件就是备份副本发送应答，那么当备份副本向主副本发送拉取
+        // 请求，服务端处理备份副本的拉取请求，就可能完成延迟生产
+        // 同时，由于备份副本同步了数据，导致主副本的 HW 增加（消费者最多只能消费到主副本的最高水位），也会触发延迟拉取任务的触发。
+        // 所以这里会尝试完成所有的延迟操作。
+        // 这里的判断条件是主副本的高水位是否发生变化，如果发生变化，表示所有的备份副本都已经完成了一次数据同步操作，因为主
+        // 副本的最高水位是所有备份副本偏移量的最小值，而备份副本完成数据同步后会更新其副本偏移量。
+        // HW <= LEO <= nextOffset
         if (leaderLWIncremented || leaderHWIncremented)
           tryCompleteDelayedRequests()
 
@@ -794,6 +802,11 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
    * whether a replica is in-sync, we only check HW.
    *
    * This function can be triggered when a replica's LEO has incremented.
+   *
+   * 一个副本加入 ISR 集合的条件：
+   * 1）这个备份副本不在 ISR 集合中
+   * 2）这个备份副本必须在 AR 集合中，只有属于分区的副本，才会加入到 ISR 集合中
+   * 3）这个备份副本的偏移量必须大于等于主副本的最高水位
    */
   private def maybeExpandIsr(followerReplica: Replica, followerFetchTimeMs: Long): Unit = {
     val needsIsrUpdate = canAddReplicaToIsr(followerReplica.brokerId) && inReadLock(leaderIsrUpdateLock) {
@@ -857,7 +870,9 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
             s"awaiting ${awaitingReplicas.map(logEndOffsetString)}")
         }
 
+        // default value: 1，至少要有一个副本同步
         val minIsr = leaderLog.config.minInSyncReplicas
+        // 所有副本的偏移量 >= requiredOffset   ====> 主副本的 HW >= required offset
         if (leaderLog.highWatermark >= requiredOffset) {
           /*
            * The topic may be configured not to accept messages if there are not enough replicas in ISR

@@ -179,7 +179,7 @@ class ReplicaFetcherThread(name: String,
 
     // For the follower replica, we do not need to keep its segment base offset and physical position.
     // These values will be computed upon becoming leader or handling a preferred read replica fetch.
-    // 更新 HW 的值
+    // 更新备份副本 HW 的值，取主副本的 HW 和备份副本的 LEO 的最小值
     val followerHighWatermark = log.updateHighWatermark(partitionData.highWatermark)
     log.maybeIncrementLogStartOffset(leaderLogStartOffset, LeaderOffsetIncremented)
     if (logTrace)
@@ -210,6 +210,7 @@ class ReplicaFetcherThread(name: String,
 
   override protected def fetchFromLeader(fetchRequest: FetchRequest.Builder): Map[TopicPartition, FetchData] = {
     try {
+      // 同步读取
       val clientResponse = leaderEndpoint.sendRequest(fetchRequest)
       val fetchResponse = clientResponse.responseBody.asInstanceOf[FetchResponse[Records]]
       if (!fetchSessionHandler.handleResponse(fetchResponse)) {

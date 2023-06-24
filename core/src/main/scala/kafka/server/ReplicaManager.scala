@@ -632,6 +632,7 @@ class ReplicaManager(val config: KafkaConfig,
         origin, entriesPerPartition, requiredAcks)
       debug("Produce to local log in %d ms".format(time.milliseconds - sTime))
 
+      // required offset: 备份副本的 LEO 不能小于这个值
       val produceStatus = localProduceResults.map { case (topicPartition, result) =>
         topicPartition ->
                 ProducePartitionStatus(
@@ -1073,6 +1074,7 @@ class ReplicaManager(val config: KafkaConfig,
         clientMetadata = clientMetadata)
       // leader partition 维护了所有 follower partition 的 LEO 的值
       // 更新 follower 的 LEO
+      // 备份副本拉取数据是通过一个定时拉取线程（ReplicaFetcherThread）发送请求完成的。
       if (isFromFollower) updateFollowerFetchState(replicaId, result)
       else result
     }
@@ -1484,6 +1486,7 @@ class ReplicaManager(val config: KafkaConfig,
 
           // we initialize highwatermark thread after the first leaderisrrequest. This ensures that all the partitions
           // have been completely populated before starting the checkpointing there by avoiding weird race conditions
+          // 初始化定时写入高水位到检查点文件任务
           startHighWatermarkCheckPointThread()
 
           maybeAddLogDirFetchers(partitionStates.keySet, highWatermarkCheckpoints)
@@ -1767,8 +1770,9 @@ class ReplicaManager(val config: KafkaConfig,
       } else {
         nonOfflinePartition(topicPartition) match {
           case Some(partition) =>
+            // 更新备份副本的偏移量数据
             if (partition.updateFollowerFetchState(followerId,
-              followerFetchOffsetMetadata = readResult.info.fetchOffsetMetadata,
+              followerFetchOffsetMetadata = readResult.info.fetchOffsetMetadata,    // 拉取到的偏移量信息
               followerStartOffset = readResult.followerLogStartOffset,
               followerFetchTimeMs = readResult.fetchTimeMs,
               leaderEndOffset = readResult.leaderLogEndOffset)) {
@@ -1796,6 +1800,7 @@ class ReplicaManager(val config: KafkaConfig,
     nonOfflinePartition(topicPartition).flatMap(_.leaderLogIfLocal.map(_.logEndOffset))
 
   // Flushes the highwatermark value for all partitions to the highwatermark file
+  // 副本管理器刷写最高水位到检查点文件
   def checkpointHighWatermarks(): Unit = {
     def putHw(logDirToCheckpoints: mutable.AnyRefMap[String, mutable.AnyRefMap[TopicPartition, Long]],
               log: Log): Unit = {
@@ -1812,6 +1817,7 @@ class ReplicaManager(val config: KafkaConfig,
     }
 
     for ((logDir, hws) <- logDirToHws) {
+      // 写入文件
       try highWatermarkCheckpoints.get(logDir).foreach(_.write(hws))
       catch {
         case e: KafkaStorageException =>

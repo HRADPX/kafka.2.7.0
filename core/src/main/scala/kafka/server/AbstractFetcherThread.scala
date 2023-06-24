@@ -121,7 +121,7 @@ abstract class AbstractFetcherThread(name: String,
 
   private def maybeFetch(): Unit = {
     val fetchRequestOpt = inLock(partitionMapLock) {
-      // 构建请求
+      // 构建请求，备份副本会带上自己的 brokerId
       val ResultWithPartitions(fetchRequestOpt, partitionsWithError) = buildFetch(partitionStates.partitionStateMap.asScala)
 
       handlePartitionsWithErrors(partitionsWithError, "maybeFetch")

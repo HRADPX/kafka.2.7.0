@@ -49,6 +49,7 @@ abstract class DelayedOperation(override val delayMs: Long,
                                 lockOpt: Option[Lock] = None)
   extends TimerTask with Logging {
 
+  // 控制 onComplete() 方法只会被调用一次
   private val completed = new AtomicBoolean(false)
   // Visible for testing
   private[server] val lock: Lock = lockOpt.getOrElse(new ReentrantLock)
@@ -123,6 +124,7 @@ abstract class DelayedOperation(override val delayMs: Long,
 
   /*
    * run() method defines a task that is executed on timeout
+   * 延迟操作超时被强制完成后，如果执行成功后，会调用 onExpiration 方法
    */
   override def run(): Unit = {
     if (forceComplete())

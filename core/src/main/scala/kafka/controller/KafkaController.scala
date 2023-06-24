@@ -1658,13 +1658,16 @@ class KafkaController(val config: KafkaConfig,
   private def processTopicChange(): Unit = {
     if (!isActive) return
     val topics = zkClient.getAllTopicsInCluster(true)
+    // 新增的 topic
     val newTopics = topics -- controllerContext.allTopics
+    // 删除的 topic
     val deletedTopics = controllerContext.allTopics.diff(topics)
     controllerContext.setAllTopics(topics)
 
     registerPartitionModificationsHandlers(newTopics.toSeq)
     // 从 ZK 读取 topic 的分配方案，其实就是元数据信息
     val addedPartitionReplicaAssignment = zkClient.getFullReplicaAssignmentForTopics(newTopics)
+    // 清触被删除的 topic
     deletedTopics.foreach(controllerContext.removeTopic)
     addedPartitionReplicaAssignment.foreach {
       case (topicAndPartition, newReplicaAssignment) => controllerContext.updatePartitionFullReplicaAssignment(topicAndPartition, newReplicaAssignment)
@@ -2444,7 +2447,7 @@ class KafkaController(val config: KafkaConfig,
         case Expire =>
           processExpire()
         case TopicChange =>
-          // 处理 topic 变更事件
+          // 处理 topic 变更事件，创建 Log，分区文件
           processTopicChange()
         case LogDirEventNotification =>
           processLogDirEventNotification()

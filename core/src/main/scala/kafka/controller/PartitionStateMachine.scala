@@ -143,6 +143,8 @@ class ZkPartitionStateMachine(config: KafkaConfig,
    * @return A map of failed and successful elections when targetState is OnlinePartitions. The keys are the
    *         topic partitions and the corresponding values are either the exception that was thrown or new
    *         leader & ISR.
+   *
+   * 将给定的分区状态转换为指定的状态
    */
   override def handleStateChanges(
     partitions: Seq[TopicPartition],
@@ -151,6 +153,7 @@ class ZkPartitionStateMachine(config: KafkaConfig,
   ): Map[TopicPartition, Either[Throwable, LeaderAndIsr]] = {
     if (partitions.nonEmpty) {
       try {
+        // 校验上一个批次是否完成
         controllerBrokerRequestBatch.newBatch()
         val result = doHandleStateChanges(
           partitions,
