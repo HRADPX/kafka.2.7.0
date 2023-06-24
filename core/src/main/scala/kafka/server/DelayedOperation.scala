@@ -202,6 +202,8 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
    * @param operation the delayed operation to be checked
    * @param watchKeys keys for bookkeeping the operation
    * @return true iff the delayed operations can be completed by the caller
+   *
+   * 创建延迟操作对象后，延迟缓存会首先尝试完成，如果不能完成延迟操作，才会被加入到监控中
    */
   def tryCompleteElseWatch(operation: T, watchKeys: Seq[Any]): Boolean = {
     assert(watchKeys.nonEmpty, "The watch key list can't be empty")
@@ -238,16 +240,20 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
     if (operation.safeTryCompleteOrElse {
       // 存储到 watcher 队列中
       watchKeys.foreach(key => watchForOperation(key, operation))
+      // 增加计数
       if (watchKeys.nonEmpty) estimatedTotalOperations.incrementAndGet()
     }) return true
 
     // if it cannot be completed by now and hence is watched, add to the expire queue also
     if (!operation.isCompleted) {
-      if (timerEnabled)
+      if (timerEnabled) {
         // SystemTimer
         // 存储到时间轮（timingWheel），当到达过期时候后，会强制执行延迟操作的 onComplete() 方法
+        // 添加到时间轮目的是在延迟操作超时后，服务端可以强制返回响应结果给客户端，加入到时间轮无需 key，因为定时器和延迟操作的键无关
         timeoutTimer.add(operation)
+      }
       if (operation.isCompleted) {
+        // 添加后完成，取消这个延迟操作的定时线程
         // cancel the timer task
         operation.cancel()
       }
@@ -261,6 +267,7 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
    * and if yes complete them.
    *
    * @return the number of completed operations during this process
+   * 外部事件调用该方法，判断给定的延迟缓存的键对应的延迟操作是否可以完成
    */
   def checkAndComplete(key: Any): Int = {
     val wl = watcherList(key)
@@ -353,10 +360,13 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
 
     // add the element to watch
     def watch(t: T): Unit = {
+      // 一个键对应一个监视器，它管理了这个键对应的所有的延迟操作
       operations.add(t)
     }
 
     // traverse the list and try to complete some watched elements
+    // 当外部事件发生时，会对这个键的所有延迟操作执行尝试完成动作，如果可以完成，会从延迟
+    // 操作链表中移除
     def tryCompleteWatched(): Int = {
       var completed = 0
 
@@ -365,13 +375,16 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
         val curr = iter.next()
         if (curr.isCompleted) {
           // another thread has completed this operation, just remove it
+          // 被其他线程完成
           iter.remove()
         } else if (curr.safeTryComplete()) {
+          // 当前线程完成
           iter.remove()
           completed += 1
         }
       }
 
+      // 所有都完成，清空键
       if (operations.isEmpty)
         removeKeyIfEmpty(key, this)
 
@@ -391,6 +404,9 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
     }
 
     // traverse the list and purge elements that are already completed by others
+    // 外部事件根据如果根据指定分区（并不是所有的延迟操作的键都是分区）尝试完成延迟的操作，如果延迟操作可以完成，只会从延迟缓存中删除这个
+    // 分区中已经完成的延迟操作，并不会删除其他分区中已经完成的延迟操作。其他分区的延迟操作会被后台清理线程清理，最终会调用这个方法完成清理
+    // 工作。
     def purgeCompleted(): Int = {
       var purged = 0
 
@@ -398,6 +414,7 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
       while (iter.hasNext) {
         val curr = iter.next()
         if (curr.isCompleted) {
+          // 完成，从链表中删除
           iter.remove()
           purged += 1
         }
@@ -416,13 +433,18 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
     // Trigger a purge if the number of completed but still being watched operations is larger than
     // the purge threshold. That number is computed by the difference btw the estimated total number of
     // operations and the number of pending delayed operations.
+    // 通常情况下，estimatedTotalOperations 表示延迟操作的个数，numDelayed 也是延迟操作的个数，但是在执行该判断前会先调用一次
+    // 定时器的 advanceClock 方法，将定时器的时钟往前移动一次。定时器在运行时，如果延迟操作延超时了，就会将延迟操作从定时器的延迟
+    // 队列中移除，从而就会破坏这个平衡关系，最终会满这足这个条件
     if (estimatedTotalOperations.get - numDelayed > purgeInterval) {
       // now set estimatedTotalOperations to delayed (the number of pending operations) since we are going to
       // clean up watchers. Note that, if more operations are completed during the clean up, we may end up with
       // a little overestimated total number of operations.
+      // 重新设置 estimatedTotalOperations 的值
       estimatedTotalOperations.getAndSet(numDelayed)
       debug("Begin purging watch lists")
       val purged = watcherLists.foldLeft(0) {
+            // 执行延迟操作的清理工作
         case (sum, watcherList) => sum + watcherList.allWatchers.map(_.purgeCompleted()).sum
       }
       debug("Purged %d elements from watch lists.".format(purged))
@@ -431,12 +453,18 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
 
   /**
    * A background reaper to expire delayed operations that have timed out
+   * 后台清理线程，用于清理那些已经完成的延迟操作，它是 DelayedOperationPurgatory 内部类。
+   * 因为有些延迟操作已经完成，但是并没有从延迟缓存中移除，这个线程的作用就是将这些已经完成的延迟操作移除。例如，生产者向分区 P1，P2 发送了
+   * 几条消息，此时会对 P1 和 P2 分别创建一个延迟生产的操作 D1、D2，当 P1 和 P2 的备份副本来拉取同步数据时，假设 P1 的备份副本先同步，
+   * 但是此时还不能完成延迟操作，等到 P2 的备份副本完成同步，此时才能完成上面两个延迟操作。由于外部事件是 P2 的备份副本完成同步，所以会
+   * 尝试完成 D2，可以完成，从延迟缓存中删除 D2，但是 D1 却没有被移除，D1 的移除就是通过这个后台清理线程完成的
    */
   private class ExpiredOperationReaper extends ShutdownableThread(
     "ExpirationReaper-%d-%s".format(brokerId, purgatoryName),
     false) {
 
     override def doWork(): Unit = {
+      // 线程调度逻辑在父类，定时器时钟的滑动间隔，每隔 200 ms 前进一次
       advanceClock(200L)
     }
   }

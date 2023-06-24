@@ -192,6 +192,9 @@ object ReplicaManager {
  * 副本管理器的每个分区通过日志管理器，为每个副本创建对应的日志。
  *
  * 同一个分区在多个消息代理节点上、一个分区管理多个副本都属于逻辑层；每个消息代理节点上的本地副本都有一个日志文件，属于物理层。
+ *
+ * 副本管理器针对生产请求和拉取请求都有一个全局的延迟缓存，生产请求对应的延迟缓存中存储了延迟生产（DelayedProduce），拉取请求对应的延迟
+ * 缓存中存储了延迟拉取（DelayedFetch）。
  */
 class ReplicaManager(val config: KafkaConfig,
                      metrics: Metrics,

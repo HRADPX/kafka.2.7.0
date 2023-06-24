@@ -67,6 +67,21 @@ object KafkaController extends Logging {
   type UpdateFeaturesCallback = Either[ApiError, Map[String, ApiError]] => Unit
 }
 
+/**
+ * Kafka 控制器，主要负责
+ *  1）分区的分配、分区的选举
+ *  2）代理节点的启动或下线时，处理代理的节点的故障转移
+ *  3）新建或删除主题，或新增分区时，处理分区的重新分配
+ *  4）管理所有分区的状态机和副本的状态机，处理状态机的变化事件
+ *
+ * 控制器、监听器和 zk 三者完成一次事件处理的步骤：
+ *  1）控制器向 zk 节点上注册监听器，每种监听器都有具体的事件处理逻辑。
+ *  2）管理员更新 zk 节点的数据，触发监听器调用不同的回调方法。
+ *  3）控制器执行具体的事件处理逻辑，处理完成后，再次注册监听器，为下次事件触发做准备。
+ *
+ * 控制器上下文保存了上一次的数据，而 zk 保存了最新的数据，两者数据会不一致。zk 节点关联的监听器触发事件处理时，监听器要比对 zk 节点
+ * 和上下文，找出新增和删除的数据。
+ */
 class KafkaController(val config: KafkaConfig,
                       zkClient: KafkaZkClient,
                       time: Time,
@@ -86,6 +101,7 @@ class KafkaController(val config: KafkaConfig,
 
   private val isAlterIsrEnabled = config.interBrokerProtocolVersion.isAlterIsrSupported
   private val stateChangeLogger = new StateChangeLogger(config.brokerId, inControllerContext = true, None)
+  // 控制器上下文，启动控制器时从 zk 初始化数据
   val controllerContext = new ControllerContext
   var controllerChannelManager = new ControllerChannelManager(controllerContext, config, time, metrics,
     stateChangeLogger, threadNamePrefix)
@@ -100,13 +116,16 @@ class KafkaController(val config: KafkaConfig,
 
   private val brokerRequestBatch = new ControllerBrokerRequestBatch(config, controllerChannelManager,
     eventManager, controllerContext, stateChangeLogger)
+  // 副本状态机，管理副本状态
   val replicaStateMachine: ReplicaStateMachine = new ZkReplicaStateMachine(config, stateChangeLogger, controllerContext, zkClient,
     new ControllerBrokerRequestBatch(config, controllerChannelManager, eventManager, controllerContext, stateChangeLogger))
+  // 分区状态机，管理分区状态
   val partitionStateMachine: PartitionStateMachine = new ZkPartitionStateMachine(config, stateChangeLogger, controllerContext, zkClient,
     new ControllerBrokerRequestBatch(config, controllerChannelManager, eventManager, controllerContext, stateChangeLogger))
   val topicDeletionManager = new TopicDeletionManager(config, controllerContext, replicaStateMachine,
     partitionStateMachine, new ControllerDeletionClient(this, zkClient))
 
+  // 各种事件处理
   private val controllerChangeHandler = new ControllerChangeHandler(eventManager)
   private val brokerChangeHandler = new BrokerChangeHandler(eventManager)
   private val brokerModificationsHandlers: mutable.Map[Int, BrokerModificationsHandler] = mutable.Map.empty
@@ -158,12 +177,16 @@ class KafkaController(val config: KafkaConfig,
    */
   def startup() = {
     // 对 zk 上面的目录（controller-state-change-handler）注册了监听器
+    // 订阅临时节点数据改变事件，选举器处理 /controller 节点被删除，以及控制器处理会话失效，都会调用选举器的 elect()
+    // 方法重新选举主控制器。
     zkClient.registerStateChangeHandler(new StateChangeHandler {
       override val name: String = StateChangeHandlers.ControllerHandler
       override def afterInitializingSession(): Unit = {
+        // 重新选举事件
         eventManager.put(RegisterBrokerAndReelect)
       }
       override def beforeInitializingSession(): Unit = {
+        // 过期事件
         val queuedEvent = eventManager.clearAndPut(Expire)
 
         // Block initialization of the new session until the expiration event is being handled,
@@ -619,13 +642,17 @@ class KafkaController(val config: KafkaConfig,
     val (newOfflineReplicasForDeletion, newOfflineReplicasNotForDeletion) =
       newOfflineReplicas.partition(p => topicDeletionManager.isTopicQueuedUpForDeletion(p.topic))
 
+    // 主副本在下线代理节点上的分区，代理节点下线后，这些分区就没有主副本了
     val partitionsWithOfflineLeader = controllerContext.partitionsWithOfflineLeader
 
     // trigger OfflinePartition state for all partitions whose current leader is one amongst the newOfflineReplicas
+    // 没有主副本的分区状态改为下线
     partitionStateMachine.handleStateChanges(partitionsWithOfflineLeader.toSeq, OfflinePartition)
     // trigger OnlinePartition state changes for offline or new partitions
+    // 重新选举分区的主副本，下线状态的分区会转换为上线状态
     partitionStateMachine.triggerOnlinePartitionStateChange()
     // trigger OfflineReplica state change for those newly offline replicas
+    // 不需要删除的副本状态标记为下线
     replicaStateMachine.handleStateChanges(newOfflineReplicasNotForDeletion.toSeq, OfflineReplica)
 
     // fail deletion of topics that are affected by the offline replicas
@@ -639,6 +666,7 @@ class KafkaController(val config: KafkaConfig,
     // If replica failure did not require leader re-election, inform brokers of the offline brokers
     // Note that during leader re-election, brokers update their metadata
     if (partitionsWithOfflineLeader.isEmpty) {
+      // 重新选举主副本后，发送请求给所有的代理节点
       sendUpdateMetadataRequest(controllerContext.liveOrShuttingDownBrokerIds.toSeq, Set.empty)
     }
   }
@@ -648,19 +676,24 @@ class KafkaController(val config: KafkaConfig,
    * It does the following -
    * 1. Move the newly created partitions to the NewPartition state
    * 2. Move the newly created partitions from NewPartition->OnlinePartition state
+   *
+   * 新建分区会调用两次分区状态机的状态改变处理方法。
    */
   private def onNewPartitionCreation(newPartitions: Set[TopicPartition]): Unit = {
     info(s"New partition creation callback for ${newPartitions.mkString(",")}")
     // 注册各种监听器
-    // 目前先 ignore
+    // 分区状态从初始的 不存在状态 改为 新建状态
     partitionStateMachine.handleStateChanges(newPartitions.toSeq, NewPartition)
+    // 副本状态从初始的 不存在状态 改为 新建状态
     replicaStateMachine.handleStateChanges(controllerContext.replicasForPartition(newPartitions).toSeq, NewReplica)
+    // 分区状态从 新建状态 改为 上线状态
     partitionStateMachine.handleStateChanges(
       newPartitions.toSeq,
       OnlinePartition,
       Some(OfflinePartitionLeaderElectionStrategy(false))
     )
     // 发送请求的逻辑在这里
+    // 副本状态从 新建状态 改为 上线状态
     replicaStateMachine.handleStateChanges(controllerContext.replicasForPartition(newPartitions).toSeq, OnlineReplica)
   }
 
@@ -1505,6 +1538,18 @@ class KafkaController(val config: KafkaConfig,
     }
   }
 
+  /**
+   * 主控制器选举机制
+   *  利用了 zk 的临时节点，每隔代理节点都会参与竞选主控制器，但只有一个代理节点可以成为主控制器，其他代理节点只有在主控制器出现故障或
+   * 会话失效时参与选举。每个代理节点都会作为 zk 的客户端，向 zk 服务端尝试创建 /controller 临时节点，但最终于只有一个代理节点可以
+   * 成功创建，创建成功的即为主控制器。
+   *  由于主控制器创建的 zk 临时节点，因此当主控制器故障或会话失效，临时节点就会被删除。这时所有的其他代理节点都会重新尝试创建
+   *  /controller 节点，并选举出新的主控制器。
+   *
+   * 调用路径 [[KafkaServer.startup()]] --> [[KafkaController.startup()]] --> 向 eventManager 中注册了 [[Startup]] 事件
+   * （保存到事件队列中）并启动 ControllerEventThread 线程  --> 从 [[ControllerEventManager.queue]] 队列中取出事件并执行
+   * --> [[KafkaController.process()]] --> [[KafkaController.processStartup()]]
+   */
   private def elect(): Unit = {
     // 从 controller 目录下获取数，如果获取到了数据，返回一个 id 号，这个 id 号就是某个 broker 的 id 号，也就是这个 broker 就是 controller
     activeControllerId = zkClient.getControllerId.getOrElse(-1)
@@ -1531,6 +1576,7 @@ class KafkaController(val config: KafkaConfig,
       info(s"${config.brokerId} successfully elected as the controller. Epoch incremented to ${controllerContext.epoch} " +
         s"and epoch zk version is now ${controllerContext.epochZkVersion}")
 
+      // 初始化方法执行的一些准备工作
       onControllerFailover()
     } catch {
       case e: ControllerMovedException =>

@@ -133,7 +133,7 @@ private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, ta
     // 任务过期时间戳
     val expiration = timerTaskEntry.expirationMs
 
-    // 任务被取消
+    // 任务被其他线程取消了
     if (timerTaskEntry.cancelled) {
       // Cancelled
       false
@@ -161,7 +161,7 @@ private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, ta
       true
     } else {
       // Out of the interval. Put it into the parent timer
-      // 过期时间在不在当前层，放到下一层，下一层的 interval 是当前层 interval * wheelSize
+      // 过期时间在不在当前层， 创建更高层的时间轮，放到下一层，下一层的 interval 是当前层 interval * wheelSize
       if (overflowWheel == null) addOverflowWheel()
       // 进下一层
       overflowWheel.add(timerTaskEntry)
@@ -169,6 +169,8 @@ private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, ta
   }
 
   // Try to advance the clock
+  // 往前移动时间轮，主要是更新了当前时间轮的当前时间。下一步是重新加入定时任务条目。
+  // 对于新的当前时间，更高层时间轮相同桶的定时任务条目在 reinsert 会降级加入到低层时间轮的不同桶，这个操作在定时器的 advanceClock 方法中
   def advanceClock(timeMs: Long): Unit = {
     if (timeMs >= currentTime + tickMs) {
       currentTime = timeMs - (timeMs % tickMs)

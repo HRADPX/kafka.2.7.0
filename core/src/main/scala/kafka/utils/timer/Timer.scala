@@ -51,6 +51,18 @@ trait Timer {
   def shutdown(): Unit
 }
 
+/**
+ * 定时器类
+ *  包含一个延迟队列和一个时间轮
+ *
+ *  延迟队列（delayQueue）中的每个元素是定时任务列表 [[TimerTaskList]]，一个定时任务列表可以存放多个定时任务条目 [[TimerTaskEntry]]，
+ * 服务端创建的所有延迟任务都会被包装成定时任务条目，然后才会加入延迟队列指定的一个定时任务列表。
+ *
+ * 但是服务端创建的延迟操作并不是直接加入定时任务列表，而是加入到时间轮 [[TimingWheel]]。但是延迟队列会作为成员变量传递给时间轮，
+ * 将延迟操作加入到定时器，实际流程是 延迟操作 --> 定时任务条目 --> 时间轮 --> 延迟队列，所以延迟操作实际上通过间接的方式加入到延迟队列中。
+ *
+ * todo 延迟队列、延迟操作（定时任务条目）
+ */
 @threadsafe
 class SystemTimer(executorName: String,
                   tickMs: Long = 1,
@@ -61,7 +73,7 @@ class SystemTimer(executorName: String,
   private[this] val taskExecutor = Executors.newFixedThreadPool(1,
     (runnable: Runnable) => KafkaThread.nonDaemon("executor-" + executorName, runnable))
 
-  // 延迟任务队列
+  // 延迟任务队列，按照失效时间排序
   private[this] val delayQueue = new DelayQueue[TimerTaskList]()
   // 任务计数器
   private[this] val taskCounter = new AtomicInteger(0)
@@ -83,6 +95,8 @@ class SystemTimer(executorName: String,
     readLock.lock()
     try {
       // timerTask.delayMs + Time.SYSTEM.hiResClockMs: dead line time
+      // 延迟操作 DelayedOperation 是一个定时任务类，并设置超时时间
+      // 将延迟操作包装成定时任务条目，加入到时间轮中
       addTimerTaskEntry(new TimerTaskEntry(timerTask, timerTask.delayMs + Time.SYSTEM.hiResClockMs))
     } finally {
       readLock.unlock()
@@ -98,6 +112,7 @@ class SystemTimer(executorName: String,
     }
   }
 
+  // 重新加入
   private[this] val reinsert = (timerTaskEntry: TimerTaskEntry) => addTimerTaskEntry(timerTaskEntry)
 
   /*
@@ -105,14 +120,19 @@ class SystemTimer(executorName: String,
    * waits up to timeoutMs before giving up.
    */
   def advanceClock(timeoutMs: Long): Boolean = {
+    // 延迟队列只会弹出超时的定时任务列表，队列中的每个元素都按照超时时间排序，如果第一个定时任务列表都没有过期，
+    // 那么其他定时任务也一定不会超时。
     var bucket = delayQueue.poll(timeoutMs, TimeUnit.MILLISECONDS)
     if (bucket != null) {
       writeLock.lock()
       try {
         while (bucket != null) {
           timingWheel.advanceClock(bucket.getExpiration)
-          // 执行 reinsert，这里本质上还是调用 insert 逻辑，如果发现延迟操作已经超时，会被立刻强制执行
+          // 执行 reinsert，这里本质上还是调用 insert 逻辑，如果发现延迟操作已经超时，会被立刻强制执行。
+          // 这里需要说明下，延迟操作对应的定时任务，只有在定时器的 addTimerTaskEntry 方法中调用，所以
+          // 该方法将定时任务列表弹出后，重新执行了 addTimerTaskEntry 方法，只有这样才有机会执行超时的定时任务。
           bucket.flush(reinsert)
+          // 立即再轮询一次，如果没有超时，则返回空
           bucket = delayQueue.poll()
         }
       } finally {
