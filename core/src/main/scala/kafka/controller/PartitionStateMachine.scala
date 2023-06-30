@@ -37,8 +37,10 @@ abstract class PartitionStateMachine(controllerContext: ControllerContext) exten
    */
   def startup(): Unit = {
     info("Initializing partition state")
+    // 初始化分区状态
     initializePartitionState()
     info("Triggering online partition state changes")
+    // 只针对新建和下线的分区做状态转换
     triggerOnlinePartitionStateChange()
     debug(s"Started partition state machine with initial state -> ${controllerContext.partitionStates}")
   }
@@ -55,6 +57,7 @@ abstract class PartitionStateMachine(controllerContext: ControllerContext) exten
    * state. This is called on a successful controller election and on broker changes
    */
   def triggerOnlinePartitionStateChange(): Unit = {
+    // 只对新建和下线的分区的状态进行转换
     val partitions = controllerContext.partitionsInStates(Set(OfflinePartition, NewPartition))
     triggerOnlineStateChangeForPartitions(partitions)
   }
@@ -88,11 +91,11 @@ abstract class PartitionStateMachine(controllerContext: ControllerContext) exten
           // else, check if the leader for partition is alive. If yes, it is in Online state, else it is in Offline state
           if (controllerContext.isReplicaOnline(currentLeaderIsrAndEpoch.leaderAndIsr.leader, topicPartition))
           // leader is alive
-            controllerContext.putPartitionState(topicPartition, OnlinePartition)
+            controllerContext.putPartitionState(topicPartition, OnlinePartition)    // 主副本存活
           else
-            controllerContext.putPartitionState(topicPartition, OfflinePartition)
+            controllerContext.putPartitionState(topicPartition, OfflinePartition)   // 主副本下线
         case None =>
-          controllerContext.putPartitionState(topicPartition, NewPartition)
+          controllerContext.putPartitionState(topicPartition, NewPartition)         // 新分区没有主副本
       }
     }
   }

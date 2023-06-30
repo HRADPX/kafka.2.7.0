@@ -492,6 +492,7 @@ abstract class AbstractControllerBrokerRequestBatch(config: KafkaConfig,
         val brokerEpoch = controllerContext.liveBrokerIdAndEpochs(broker)
         val leaderAndIsrRequestBuilder = new LeaderAndIsrRequest.Builder(leaderAndIsrRequestVersion, controllerId,
           controllerEpoch, brokerEpoch, leaderAndIsrPartitionStates.values.toBuffer.asJava, leaders.asJava)
+        // 发送 LEAD_AND_ISR 请求，处理逻辑在 KafkaApis 里
         sendRequest(broker, leaderAndIsrRequestBuilder, (r: AbstractResponse) => {
           val leaderAndIsrResponse = r.asInstanceOf[LeaderAndIsrResponse]
           sendEvent(LeaderAndIsrResponseReceived(leaderAndIsrResponse, broker))

@@ -141,6 +141,7 @@ class KafkaApis(val requestChannel: RequestChannel,           // 请求通道
         // 获取偏移量请求
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
+        // LeaderAndIsr 请求
         case ApiKeys.LEADER_AND_ISR => handleLeaderAndIsrRequest(request)
         case ApiKeys.STOP_REPLICA => handleStopReplicaRequest(request)
         // 更新元数据请求
@@ -225,6 +226,7 @@ class KafkaApis(val requestChannel: RequestChannel,           // 请求通道
     val correlationId = request.header.correlationId
     val leaderAndIsrRequest = request.body[LeaderAndIsrRequest]
 
+    // 回调
     def onLeadershipChange(updatedLeaders: Iterable[Partition], updatedFollowers: Iterable[Partition]): Unit = {
       // for each new leader or follower, call coordinator to handle consumer group migration.
       // this callback is invoked under the replica state change lock to ensure proper order of
@@ -252,6 +254,7 @@ class KafkaApis(val requestChannel: RequestChannel,           // 请求通道
         s"${leaderAndIsrRequest.brokerEpoch} smaller than the current broker epoch ${controller.brokerEpoch}")
       sendResponseExemptThrottle(request, leaderAndIsrRequest.getErrorResponse(0, Errors.STALE_BROKER_EPOCH.exception))
     } else {
+      // 分区在当前节点上成为主副本还是备份副本，走的都是这个方法
       val response = replicaManager.becomeLeaderOrFollower(correlationId, leaderAndIsrRequest, onLeadershipChange)
       sendResponseExemptThrottle(request, response)
     }

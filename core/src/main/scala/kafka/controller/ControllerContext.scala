@@ -42,6 +42,7 @@ case class ReplicaAssignment private (replicas: Seq[Int],
                                       addingReplicas: Seq[Int],
                                       removingReplicas: Seq[Int]) {
 
+  // replicas 包含新增和需要移除的副本
   lazy val originReplicas: Seq[Int] = replicas.diff(addingReplicas)
   lazy val targetReplicas: Seq[Int] = replicas.diff(removingReplicas)
 
@@ -82,14 +83,26 @@ class ControllerContext {
   var epoch: Int = KafkaController.InitialControllerEpoch
   var epochZkVersion: Int = KafkaController.InitialControllerEpochZkVersion
 
+  // 存储所有的 topic
   val allTopics = mutable.Set.empty[String]
+  // 分区重分配时使用，存储分区和 TRS（重分配后的副本集）的映射关系，
   val partitionAssignments = mutable.Map.empty[String, mutable.Map[Int, ReplicaAssignment]]
+  // 存储分区的主副本信息
   private val partitionLeadershipInfo = mutable.Map.empty[TopicPartition, LeaderIsrAndControllerEpoch]
+  // 存储正在执行重分配的分区
   val partitionsBeingReassigned = mutable.Set.empty[TopicPartition]
   val partitionStates = mutable.Map.empty[TopicPartition, PartitionState]
   val replicaStates = mutable.Map.empty[PartitionAndReplica, ReplicaState]
   val replicasOnOfflineDirs = mutable.Map.empty[Int, Set[TopicPartition]]
 
+  // 存储即将要被删除的主题
+  // 删除主题监听器触发时，会将需要删除的主题添加到这个待删除集合中，只有主题被删除成功，它才会从待删除集合中移除。
+  // 否则，如果删除未开始、未完成或删除失败，主题都会一直存在这个集合中。
+  //
+  // 主题可以被删除的条件：
+  //  1）主题还没有删除完成，即还在 待删除集合 中
+  //  2）还没开始删除主题，即不存在任何一个副本状态是 开始删除
+  //  3）删除主题有效，即不在 无效的主题集合（topicsIneligibleForDeletion） 中
   val topicsToBeDeleted = mutable.Set.empty[String]
 
   /** The following topicsWithDeletionStarted variable is used to properly update the offlinePartitionCount metric.
@@ -112,6 +125,7 @@ class ControllerContext {
    * its partition state changes in the offlinePartitionCount metric
    */
   val topicsWithDeletionStarted = mutable.Set.empty[String]
+  // 删除无效的主题
   val topicsIneligibleForDeletion = mutable.Set.empty[String]
 
   private def clearTopicsState(): Unit = {
@@ -140,7 +154,9 @@ class ControllerContext {
 
   def updatePartitionFullReplicaAssignment(topicPartition: TopicPartition, newAssignment: ReplicaAssignment): Unit = {
     val assignments = partitionAssignments.getOrElseUpdate(topicPartition.topic, mutable.Map.empty)
+    // previous 先前的分配，更新分区分配信息到 partitionAssignments 中
     val previous = assignments.put(topicPartition.partition, newAssignment)
+    // 主副本信息
     val leadershipInfo = partitionLeadershipInfo.get(topicPartition)
     updatePreferredReplicaImbalanceMetric(topicPartition, previous, leadershipInfo,
       Some(newAssignment), leadershipInfo)
@@ -447,6 +463,7 @@ class ControllerContext {
                                                     oldLeadershipInfo: Option[LeaderIsrAndControllerEpoch],
                                                     newReplicaAssignment: Option[ReplicaAssignment],
                                                     newLeadershipInfo: Option[LeaderIsrAndControllerEpoch]): Unit = {
+    // 主题不能是即将被删除
     if (!isTopicQueuedUpForDeletion(partition.topic)) {
       oldReplicaAssignment.foreach { replicaAssignment =>
         oldLeadershipInfo.foreach { leadershipInfo =>

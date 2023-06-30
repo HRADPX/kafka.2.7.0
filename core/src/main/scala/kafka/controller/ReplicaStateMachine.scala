@@ -35,6 +35,7 @@ abstract class ReplicaStateMachine(controllerContext: ControllerContext) extends
    */
   def startup(): Unit = {
     info("Initializing replica state")
+    // 初始化副本状态
     initializeReplicaState()
     info("Triggering online replica state changes")
     val (onlineReplicas, offlineReplicas) = controllerContext.onlineAndOfflineReplicas
@@ -61,11 +62,13 @@ abstract class ReplicaStateMachine(controllerContext: ControllerContext) extends
       replicas.foreach { replicaId =>
         val partitionAndReplica = PartitionAndReplica(partition, replicaId)
         if (controllerContext.isReplicaOnline(replicaId, partition)) {
+          // 存活的副本状态初始化为 上线 状态
           controllerContext.putReplicaState(partitionAndReplica, OnlineReplica)
         } else {
           // mark replicas on dead brokers as failed for topic deletion, if they belong to a topic to be deleted.
           // This is required during controller failover since during controller failover a broker can go down,
           // so the replicas on that broker should be moved to ReplicaDeletionIneligible to be on the safer side.
+          // 不存活的副本状态转换为 删除失败 状态
           controllerContext.putReplicaState(partitionAndReplica, ReplicaDeletionIneligible)
         }
       }
@@ -152,6 +155,11 @@ class ZkReplicaStateMachine(config: KafkaConfig,
    *
    * ReplicaDeletionSuccessful -> NonExistentReplica
    * -- remove the replica from the in memory partition replica assignment cache
+   *
+   * 处理副本状态变更，方法会确保状态变更时都是从合法的前置状态转到目标状态。
+   * 1）NonExistentReplica --> NewReplica
+   * 2）NewReplica -> OnlineReplica：增加一个新的副本到分配的副本集中
+   * ...
    *
    * @param replicaId The replica for which the state transition is invoked
    * @param replicas The partitions on this replica for which the state transition is invoked

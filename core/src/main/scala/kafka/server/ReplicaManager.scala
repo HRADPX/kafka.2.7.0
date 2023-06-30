@@ -1393,6 +1393,7 @@ class ReplicaManager(val config: KafkaConfig,
           val partitionStates = new mutable.HashMap[Partition, LeaderAndIsrPartitionState]()
 
           // First create the partition if it doesn't exist already
+          // 1）如果分区不存在，首先创建分区（保存了主题和分区编号）
           requestPartitionStates.foreach { partitionState =>
             val topicPartition = new TopicPartition(partitionState.topicName, partitionState.partitionIndex)
             val partitionOpt = getPartition(topicPartition) match {
@@ -1407,6 +1408,7 @@ class ReplicaManager(val config: KafkaConfig,
               case HostedPartition.Online(partition) =>
                 Some(partition)
 
+              // 不存在，则存储到 allPartitions 集合中
               case HostedPartition.None =>
                 val partition = Partition(topicPartition, time, this)
                 allPartitions.putIfNotExists(topicPartition, HostedPartition.Online(partition))
@@ -1414,6 +1416,7 @@ class ReplicaManager(val config: KafkaConfig,
             }
 
             // Next check partition's leader epoch
+            // 2）检查分区的 epoch，如果合法，保存到 partitionStates 中
             partitionOpt.foreach { partition =>
               val currentLeaderEpoch = partition.getLeaderEpoch
               val requestLeaderEpoch = partitionState.leaderEpoch
@@ -1445,18 +1448,23 @@ class ReplicaManager(val config: KafkaConfig,
             }
           }
 
-          val partitionsToBeLeader = partitionStates.filter { case (_, partitionState) =>
+          // 一个分区只能有一个主副本，对于同一个分区而言，如果 leaderAndIsr 请求的主副本标号和当前代理节点的编号相等，
+          // 则表示这个分区的主副本在当前节点上，反之是备份副本
+          // 因为一个分区在一个代理节点上只允许一个副本，所以同一个
+           val partitionsToBeLeader = partitionStates.filter { case (_, partitionState) =>
             partitionState.leader == localBrokerId
           }
           val partitionsToBeFollower = partitionStates.filter { case (k, _) => !partitionsToBeLeader.contains(k) }
 
           val highWatermarkCheckpoints = new LazyOffsetCheckpoints(this.highWatermarkCheckpoints)
           val partitionsBecomeLeader = if (partitionsToBeLeader.nonEmpty)
+          // 3）当前代理节点成为分区主副本，创建主副本
             makeLeaders(controllerId, controllerEpoch, partitionsToBeLeader, correlationId, responseMap,
               highWatermarkCheckpoints)
           else
             Set.empty[Partition]
           val partitionsBecomeFollower = if (partitionsToBeFollower.nonEmpty)
+          // 当前代理节点成为分区备份副本，创建备份副本
             makeFollowers(controllerId, controllerEpoch, partitionsToBeFollower, correlationId, responseMap,
               highWatermarkCheckpoints)
           else
@@ -1489,13 +1497,14 @@ class ReplicaManager(val config: KafkaConfig,
 
           // we initialize highwatermark thread after the first leaderisrrequest. This ensures that all the partitions
           // have been completely populated before starting the checkpointing there by avoiding weird race conditions
-          // 初始化定时写入高水位到检查点文件任务
+          // 4）初始化定时写入高水位到检查点文件任务，只会在代理节点第一次收到 leaderAndIsr 请求启动
           startHighWatermarkCheckPointThread()
 
           maybeAddLogDirFetchers(partitionStates.keySet, highWatermarkCheckpoints)
 
           replicaFetcherManager.shutdownIdleFetcherThreads()
           replicaAlterLogDirsManager.shutdownIdleFetcherThreads()
+          // 执行回调
           onLeadershipChange(partitionsBecomeLeader, partitionsBecomeFollower)
           val responsePartitions = responseMap.iterator.map { case (tp, error) =>
             new LeaderAndIsrPartitionError()
