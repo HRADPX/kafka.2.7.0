@@ -702,6 +702,16 @@ class KafkaController(val config: KafkaConfig,
    * 2. Move the newly created partitions from NewPartition->OnlinePartition state
    *
    * 新建分区会调用两次分区状态机的状态改变处理方法。
+   *
+   * 假设创建了一个分区 P1，它的副本分别在代理节点 [0,1,2] 上，用 [R0,R1,R2] 表示这三个副本。下面表示了新建分区 P1 的过程中，
+   * 状态机以及上下文的变化：
+   * 1）分区 P1 从 不存在状态 改为 新建状态，更新分区状态机: [P1 -> NewPartition]
+   * 2）分区的所有副本从 不存在状态 改为 新建状态。这一步会判断是否存在主副本，但是由于是新建分区，分区还没有主副本，因此这一步也
+   * 只是更新副本状态机: [P1R0 -> NewReplica],[P1R1 -> NewReplica],[P1R2 -> NewReplica]
+   * 3）分区 P1 从 新建状态 改为 上线状态，控制器为分区选举主副本、创建 zk 节点（/brokers/topics/[topic]/[partition]/state）、
+   * 更新上下文的 partitionLeadershipInfo 变量、更新分区状态机: [P1 -> OnlinePartition].
+   * 4）分区 P1 的所有副本从 新建状态 改为 上线状态，更新上下文的 partitionReplicaAssignment 变量: P1 -> [P1R0,P1R1,P1R2],
+   * 更新副本状态机: [P1R0 -> OnlineReplica],[P1R1 -> OnlineReplica],[P1R2 -> OnlineReplica]
    */
   private def onNewPartitionCreation(newPartitions: Set[TopicPartition]): Unit = {
     info(s"New partition creation callback for ${newPartitions.mkString(",")}")
@@ -714,7 +724,7 @@ class KafkaController(val config: KafkaConfig,
     partitionStateMachine.handleStateChanges(
       newPartitions.toSeq,
       OnlinePartition,
-      Some(OfflinePartitionLeaderElectionStrategy(false))
+      Some(OfflinePartitionLeaderElectionStrategy(false)) // 这里多了一个主副本选择策略
     )
     // 发送请求的逻辑在这里
     // 副本状态从 新建状态 改为 上线状态
@@ -1142,6 +1152,9 @@ class KafkaController(val config: KafkaConfig,
     }
   }
 
+  // 重新分配分区从 RS 中选举一个主副本，分区的 ISR 中一定包含 TRS 的所有副本，但是不一定包含 ORA 的全部副本。
+  // 在 RS 同步副本的过程，OAR 的副本可能会因为落后太多从 ISR 中移除。但是可以保证的是，TRS 的所有副本一定在
+  // RS 中。
   private def moveReassignedPartitionLeaderIfRequired(topicPartition: TopicPartition,
                                                       newAssignment: ReplicaAssignment): Unit = {
     val reassignedReplicas = newAssignment.replicas
@@ -1153,7 +1166,7 @@ class KafkaController(val config: KafkaConfig,
         s"is not in the new list of replicas ${reassignedReplicas.mkString(",")}. Re-electing leader")
       // move the leader to one of the alive and caught up new replicas
       partitionStateMachine.handleStateChanges(Seq(topicPartition), OnlinePartition, Some(ReassignPartitionLeaderElectionStrategy))
-      // 当前副本已经在 TRS 中，并且在线
+      // 当前副本已经在 TRS 中，并且在线，更新下元数据
     } else if (controllerContext.isReplicaOnline(currentLeader, topicPartition)) {
       info(s"Leader $currentLeader for partition $topicPartition being reassigned, " +
         s"is already in the new list of replicas ${reassignedReplicas.mkString(",")} and is alive")
@@ -1572,7 +1585,9 @@ class KafkaController(val config: KafkaConfig,
   }
 
   private def processStartup(): Unit = {
-    // 向 zk 的 controller 目录下注册一个 controller 变更事件
+    // 在执行选举之前会在向 zk 的 controller 目录下注册一个 controller 变更事件，
+    // 订阅临时节点上数据改变事件。选举器在处理 /controller 节点被删除，以及控制器
+    // 处理会话失效，都会调用选举器的 elect 方法重新选举主控制器。
     zkClient.registerZNodeChangeHandlerAndCheckExistence(controllerChangeHandler)
     // 执行选举过程
     elect()
@@ -1662,6 +1677,7 @@ class KafkaController(val config: KafkaConfig,
    * 调用路径 [[KafkaServer.startup()]] --> [[KafkaController.startup()]] --> 向 eventManager 中注册了 [[Startup]] 事件
    * （保存到事件队列中）并启动 ControllerEventThread 线程  --> 从 [[ControllerEventManager.queue]] 队列中取出事件并执行
    * --> [[KafkaController.process()]] --> [[KafkaController.processStartup()]]
+   * 此外，除了上面的正常选举，在会话失效或者临时节点被删除时，代理节点都会重新选举主控制器。
    */
   private def elect(): Unit = {
     // 从 controller 目录下获取数，如果获取到了数据，返回一个 id 号，这个 id 号就是某个 broker 的 id 号，也就是这个 broker 就是 controller
@@ -1689,7 +1705,7 @@ class KafkaController(val config: KafkaConfig,
       info(s"${config.brokerId} successfully elected as the controller. Epoch incremented to ${controllerContext.epoch} " +
         s"and epoch zk version is now ${controllerContext.epochZkVersion}")
 
-      // 初始化方法执行的一些准备工作
+      // 初始化方法执行的一些准备工作，只有成功创建临时节点的代理节点才会调用该方法
       onControllerFailover()
     } catch {
       case e: ControllerMovedException =>
@@ -1817,6 +1833,7 @@ class KafkaController(val config: KafkaConfig,
   // 处理主题变更，这可能是分区重分配的驱动之一
   private def processTopicChange(): Unit = {
     if (!isActive) return
+    // 从 zk 中获取所有 topic，zk 里的数据比内容中的新
     val topics = zkClient.getAllTopicsInCluster(true)
     // 新增的 topic
     val newTopics = topics -- controllerContext.allTopics
@@ -2609,10 +2626,12 @@ class KafkaController(val config: KafkaConfig,
           processControllerChange()
         case Reelect =>
           processReelect()
+        // 注册新的代理节点并重新选举
         case RegisterBrokerAndReelect =>
           processRegisterBrokerAndReelect()
         case Expire =>
           processExpire()
+        // topic 变更事件
         case TopicChange =>
           // 处理 topic 变更事件，创建 Log，分区文件
           processTopicChange()

@@ -156,10 +156,26 @@ class ZkReplicaStateMachine(config: KafkaConfig,
    * ReplicaDeletionSuccessful -> NonExistentReplica
    * -- remove the replica from the in memory partition replica assignment cache
    *
+   * NewReplica: 新创建主题，重新分配分区时创建新副本，副本状态为 新建，该状态下副本只能收到 成为备份副本 的请求。
+   * OnlineReplica: 当副本启动，并且是分区副本集的一部分，副本状态为 在线，该状态下可以收到 成为备份副本 和 成为主副本 的请求。
+   * OfflineReplica: 代理节点宕机后，节点上的所有副本状态为 下线。
+   * NonExistentReplica: 副本被删除成功后，状态为 不存在。
+   *
    * 处理副本状态变更，方法会确保状态变更时都是从合法的前置状态转到目标状态。
    * 1）NonExistentReplica --> NewReplica
    * 2）NewReplica -> OnlineReplica：增加一个新的副本到分配的副本集中
    * ...
+   *
+   * 1）副本从 不存在状态 到 新建状态，如果分区存在主副本，而且副本的编号不是当前新建的副本的编号，说明当前新建的副本会作为分区的备份副本。
+   * 控制器将分区信息发送给这个新建的副本。
+   * 2）副本从其他状态（上线、下线、删除失败）到 上线状态，如果分区存在主副本，控制器也将分区信息发送给当前副本
+   * （分区信息包括：主副本、ISR集合、AR集合）
+   *
+   * todo
+   * 副本从 不存在状态 到 新建状态 时，还没有执行 为分区选举主副本，副本从 新建状态到 上线状态 也不会执行判断分区存在主副本的逻辑。
+   * 用到这两个逻辑的是其他的场景，例如为分区增加副本数，会执行重新分配分区，对于新的副本，就会执行步骤 1）。此外，如果不是从
+   * 新建状态，而是从其他状态转为 上线状态，就会执行步骤 2）
+   *
    *
    * @param replicaId The replica for which the state transition is invoked
    * @param replicas The partitions on this replica for which the state transition is invoked
@@ -169,10 +185,12 @@ class ZkReplicaStateMachine(config: KafkaConfig,
     val stateLogger = stateChangeLogger.withControllerEpoch(controllerContext.epoch)
     val traceEnabled = stateLogger.isTraceEnabled
     replicas.foreach(replica => controllerContext.putReplicaStateIfNotExists(replica, NonExistentReplica))
+    // 校验前置状态是否合法
     val (validReplicas, invalidReplicas) = controllerContext.checkValidReplicaStateChange(replicas, targetState)
     invalidReplicas.foreach(replica => logInvalidTransition(replica, targetState))
 
     targetState match {
+      // 不存在状态 转为 新建状态（因为每个转换后状态必须是从合法的前置状态转换而来，这个逻辑已经在上面的做了校验）
       case NewReplica =>
         validReplicas.foreach { replica =>
           val partition = replica.topicPartition
@@ -180,6 +198,8 @@ class ZkReplicaStateMachine(config: KafkaConfig,
 
           controllerContext.partitionLeadershipInfo(partition) match {
             case Some(leaderIsrAndControllerEpoch) =>
+              // 如果这个副本是主副本，不能转为新建状态，上线状态不能逆转为新建状态
+              // 新创建的副本只能作为分区的备份副本存在，所以需要向新副本发送分区的主副本等其他信息。
               if (leaderIsrAndControllerEpoch.leaderAndIsr.leader == replicaId) {
                 val exception = new StateChangeFailedException(s"Replica $replicaId for partition $partition cannot be moved to NewReplica state as it is being requested to become leader")
                 logFailedStateChange(replica, currentState, OfflineReplica, exception)
@@ -192,6 +212,7 @@ class ZkReplicaStateMachine(config: KafkaConfig,
                   isNew = true)
                 if (traceEnabled)
                   logSuccessfulTransition(stateLogger, replicaId, partition, currentState, NewReplica)
+                // 加入到副本集，转换状态为 新建状态
                 controllerContext.putReplicaState(replica, NewReplica)
               }
             case None =>
@@ -200,19 +221,24 @@ class ZkReplicaStateMachine(config: KafkaConfig,
               controllerContext.putReplicaState(replica, NewReplica)
           }
         }
+      // 新建状态、在线状态、下线状态、删除失败状态 都可以到在线状态
       case OnlineReplica =>
         validReplicas.foreach { replica =>
           val partition = replica.topicPartition
+          // 当前副本的状态
           val currentState = controllerContext.replicaState(replica)
 
+          // 新建状态 --> 在线状态
           currentState match {
             case NewReplica =>
               val assignment = controllerContext.partitionFullReplicaAssignment(partition)
+              // 如果副本集中不包含当前这个新建的副本，更新副本集
               if (!assignment.replicas.contains(replicaId)) {
                 error(s"Adding replica ($replicaId) that is not part of the assignment $assignment")
                 val newAssignment = assignment.copy(replicas = assignment.replicas :+ replicaId)
                 controllerContext.updatePartitionFullReplicaAssignment(partition, newAssignment)
               }
+            // 在线状态 -> 在线状态
             case _ =>
               controllerContext.partitionLeadershipInfo(partition) match {
                 case Some(leaderIsrAndControllerEpoch) =>

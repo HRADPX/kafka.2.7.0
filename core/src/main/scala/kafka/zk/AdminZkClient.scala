@@ -158,6 +158,8 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
     try {
       val assignment = replicaAssignment.map { case (partitionId, replicas) => (new TopicPartition(topic,partitionId), replicas) }.toMap
 
+      // 写 zk 节点（/brokers/topics/[topic]），这个会触发 TopicChange 事件，对应的监听器 TopicChangeHandler
+      // （broker 启动时调用 elect() -> onControllerFailover()），最终会调用 processTopicChange() 方法
       if (!isUpdate) {
         zkClient.createTopicAssignment(topic, assignment.map { case (k, v) => k -> v.replicas })
       } else {
