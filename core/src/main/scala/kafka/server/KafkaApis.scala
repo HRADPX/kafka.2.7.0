@@ -143,6 +143,7 @@ class KafkaApis(val requestChannel: RequestChannel,           // 请求通道
         case ApiKeys.METADATA => handleTopicMetadataRequest(request)
         // LeaderAndIsr 请求
         case ApiKeys.LEADER_AND_ISR => handleLeaderAndIsrRequest(request)
+        // 停止副本请求
         case ApiKeys.STOP_REPLICA => handleStopReplicaRequest(request)
         // 更新元数据请求
         case ApiKeys.UPDATE_METADATA => handleUpdateMetadataRequest(request)

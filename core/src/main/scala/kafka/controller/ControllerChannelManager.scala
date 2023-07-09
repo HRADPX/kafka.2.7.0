@@ -339,10 +339,14 @@ class ControllerBrokerRequestBatch(config: KafkaConfig,
 
 }
 
+/**
+ * 控制器向服务端发送的请求类型有效，只用了 4 个 Map 来保存不同的请求类型的请求。
+ */
 abstract class AbstractControllerBrokerRequestBatch(config: KafkaConfig,
                                                     controllerContext: ControllerContext,
                                                     stateChangeLogger: StateChangeLogger) extends Logging {
   val controllerId: Int = config.brokerId
+  // key: brokerId
   val leaderAndIsrRequestMap = mutable.Map.empty[Int, mutable.Map[TopicPartition, LeaderAndIsrPartitionState]]
   val stopReplicaRequestMap = mutable.Map.empty[Int, mutable.Map[TopicPartition, StopReplicaPartitionState]]
   val updateMetadataRequestBrokerSet = mutable.Set.empty[Int]
@@ -375,6 +379,8 @@ abstract class AbstractControllerBrokerRequestBatch(config: KafkaConfig,
     updateMetadataRequestPartitionInfoMap.clear()
   }
 
+  // 将 LAR 请求添加到代理节点，但还没有开始发送
+  // 对于同一个分区的不同副本所在的节点，它们收到的分区信息是一样的，但是由于代理节点的编号不一样，所以处理逻辑不同
   def addLeaderAndIsrRequestForBrokers(brokerIds: Seq[Int],
                                        topicPartition: TopicPartition,
                                        leaderIsrAndControllerEpoch: LeaderIsrAndControllerEpoch,

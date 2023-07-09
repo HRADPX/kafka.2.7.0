@@ -634,6 +634,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
       (maybeIncrementLeaderHW(leaderLog), isNewLeader)
     }
     // some delayed operations may be unblocked after HW changed
+    // HW 变化，尝试完成延迟操作
     if (leaderHWIncremented)
       tryCompleteDelayedRequests()
     isNewLeader

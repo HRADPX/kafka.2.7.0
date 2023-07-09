@@ -250,7 +250,7 @@ class ReplicaManager(val config: KafkaConfig,
     valueFactory = Some(tp => HostedPartition.Online(Partition(tp, time, this)))
   )
   private val replicaStateChangeLock = new Object
-  // follower partition 如何拉取 leader partition 数据的
+  // 拉取管理器，管理所有的备份副本对应的分区信息
   val replicaFetcherManager = createReplicaFetcherManager(metrics, time, threadNamePrefix, quotaManagers.follower)
   val replicaAlterLogDirsManager = createReplicaAlterLogDirsManager(quotaManagers.alterLogDirs, brokerTopicStats)
   private val highWatermarkCheckPointThreadStarted = new AtomicBoolean(false)
@@ -385,6 +385,12 @@ class ReplicaManager(val config: KafkaConfig,
     delayedFetchPurgatory.checkAndComplete(topicPartitionOperationKey)
   }
 
+  /**
+   * 停止副本请求处理逻辑:
+   * 1）停止分区的拉取线程
+   * 2）如果要删除分区（deletePartition = true，如副本的状态为开始删除），副本管理器就会通过分区对象删除副本对应的本地日志文件。
+   * 3）删除日志和检查点文件
+   */
   def stopReplicas(correlationId: Int,
                    controllerId: Int,
                    controllerEpoch: Int,
@@ -460,6 +466,7 @@ class ReplicaManager(val config: KafkaConfig,
         }
 
         // First stop fetchers for all partitions.
+        // 1）删除拉取线程
         val partitions = stoppedPartitions.keySet
         replicaFetcherManager.removeFetcherForPartitions(partitions)
         replicaAlterLogDirsManager.removeFetcherForPartitions(partitions)
@@ -468,6 +475,7 @@ class ReplicaManager(val config: KafkaConfig,
         // ReplicaManager to get Partition's information so they must be stopped first.
         val deletedPartitions = mutable.Set.empty[TopicPartition]
         stoppedPartitions.forKeyValue { (topicPartition, partitionState) =>
+          // 根据这个变量的值判断是否执行删除分区逻辑
           if (partitionState.deletePartition) {
             getPartition(topicPartition) match {
               case hostedPartition@HostedPartition.Online(partition) =>
@@ -475,6 +483,7 @@ class ReplicaManager(val config: KafkaConfig,
                   maybeRemoveTopicMetrics(topicPartition.topic)
                   // Logs are not deleted here. They are deleted in a single batch later on.
                   // This is done to avoid having to checkpoint for every deletions.
+                  // 删除分区，面向对象
                   partition.delete()
                 }
 
@@ -490,6 +499,7 @@ class ReplicaManager(val config: KafkaConfig,
         }
 
         // Third delete the logs and checkpoint.
+        // 删除日志和检查点
         logManager.asyncDelete(deletedPartitions, (topicPartition, exception) => {
           exception match {
             case e: KafkaStorageException =>
@@ -1364,6 +1374,13 @@ class ReplicaManager(val config: KafkaConfig,
     }
   }
 
+  /**
+   * 1）创建分区对象，如果分区已经存在，则使用 LAI 请求中最新的分区状态。
+   * 2）对成为主副本的分区调用 makeLeaders 方法，为这些分区创建主副本。
+   * 3）对成为备份副本的分区调用 makeFollowers 方法，为这些分区创建备份副本。
+   * 4）如果代理节点第一次收到 LAI 请求，启动高水位检查线程。
+   * 5）移除空闲的拉取线程，并调用 onLeadershipChange 回调方法。
+   */
   def becomeLeaderOrFollower(correlationId: Int,
                              leaderAndIsrRequest: LeaderAndIsrRequest,
                              onLeadershipChange: (Iterable[Partition], Iterable[Partition]) => Unit): LeaderAndIsrResponse = {
@@ -1451,6 +1468,8 @@ class ReplicaManager(val config: KafkaConfig,
           // 一个分区只能有一个主副本，对于同一个分区而言，如果 leaderAndIsr 请求的主副本标号和当前代理节点的编号相等，
           // 则表示这个分区的主副本在当前节点上，反之是备份副本
           // 因为一个分区在一个代理节点上只允许一个副本，所以同一个
+          // 一个代理节点接收的 LAI 请求包含多个分区，副本管理器会将请求的所有分区按照 分区状态的主副本（leadId）是否等于当前代理
+          // 节点的编号（brokerId）分为两种：成为主副本的分区、成为备份副本的分区
            val partitionsToBeLeader = partitionStates.filter { case (_, partitionState) =>
             partitionState.leader == localBrokerId
           }
@@ -1502,6 +1521,7 @@ class ReplicaManager(val config: KafkaConfig,
 
           maybeAddLogDirFetchers(partitionStates.keySet, highWatermarkCheckpoints)
 
+          // 5）移除空闲的拉取线程
           replicaFetcherManager.shutdownIdleFetcherThreads()
           replicaAlterLogDirsManager.shutdownIdleFetcherThreads()
           // 执行回调
@@ -1586,13 +1606,17 @@ class ReplicaManager(val config: KafkaConfig,
 
     try {
       // First stop fetchers for all the partitions
+      // 主副本，拉取管理器不维护分区的主副本，将其移除
       replicaFetcherManager.removeFetcherForPartitions(partitionStates.keySet.map(_.topicPartition))
       stateChangeLogger.info(s"Stopped fetchers as part of LeaderAndIsr request correlationId $correlationId from " +
         s"controller $controllerId epoch $controllerEpoch as part of the become-leader transition for " +
         s"${partitionStates.size} partitions")
       // Update the partition information to be the leader
+      // 调用每个分区的 makeLeader 方法，创建主副本
       partitionStates.forKeyValue { (partition, partitionState) =>
         try {
+          // 1）分区对象的主副本不存在
+          // 2）分区对象主副本存在，但它和分区状态对象的主副本不同（主副本发生变化）
           if (partition.makeLeader(partitionState, highWatermarkCheckpoints))
             partitionsToMakeLeaders += partition
           else
@@ -1706,6 +1730,7 @@ class ReplicaManager(val config: KafkaConfig,
         }
       }
 
+      // 先将分区从拉取管理器中移除，主要针对 主副本转为备份副本的场景
       replicaFetcherManager.removeFetcherForPartitions(partitionsToMakeFollower.map(_.topicPartition))
       stateChangeLogger.info(s"Stopped fetchers as part of become-follower request from controller $controllerId " +
         s"epoch $controllerEpoch with correlation id $correlationId for ${partitionsToMakeFollower.size} partitions")

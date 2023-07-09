@@ -103,6 +103,9 @@ class KafkaController(val config: KafkaConfig,
   private val stateChangeLogger = new StateChangeLogger(config.brokerId, inControllerContext = true, None)
   // 控制器上下文，启动控制器时从 zk 初始化数据
   val controllerContext = new ControllerContext
+  // 控制器通道管理器，其保存了代理节点编号到代理节点状态（ControllerBrokerStateInfo）的映射关系。
+  // 控制器要发送请求给代理节点，就需要维护到服务端节点的网络连接，它通过代理节点监听器，在代理节点发生
+  // 变更时，更新通道管理器里的代理节点状态信息（网络连接对象，请求队列，请求发送线程等）
   var controllerChannelManager = new ControllerChannelManager(controllerContext, config, time, metrics,
     stateChangeLogger, threadNamePrefix)
 
@@ -304,6 +307,8 @@ class KafkaController(val config: KafkaConfig,
      *      分区没有主副本，初始化为 新建
      *    2）状态转换
      *      新建 或 下线 的分区，转换为 上线
+     *
+     * 状态 case: P429
      */
     replicaStateMachine.startup()
     partitionStateMachine.startup()
@@ -563,6 +568,11 @@ class KafkaController(val config: KafkaConfig,
    *    partitions currently new or offline (rather than every partition this controller is aware of)
    * 2. Even if we do refresh the cache, there is no guarantee that by the time the leader and ISR request reaches
    *    every broker that it is still valid.  Brokers check the leader epoch to determine validity of the request.
+   *
+   * 代理节点上线有两种场景: 新启动、重新启动。新启动的代理节点之前不在集群中，没有分配到任何分区，控制器不会处理分区和副本的状态改变。
+   * 重新启动的代理节点之前在集群中，并分配到分区，控制器需要处理分区和副本的状态改变。
+   *
+   * 代理节点下线、重新上线、选举最优副本过程: P426
    */
   private def onBrokerStartup(newBrokers: Seq[Int]): Unit = {
     info(s"New broker startup callback for ${newBrokers.mkString(",")}")
@@ -584,7 +594,7 @@ class KafkaController(val config: KafkaConfig,
     replicaStateMachine.handleStateChanges(allReplicasOnNewBrokers.toSeq, OnlineReplica)
     // when a new broker comes up, the controller needs to trigger leader election for all new and offline partitions
     // to see if these brokers can become leaders for some/all of those
-    // 分区选举主副本，如果【分区】的状态为 新建 或 下线，则重新选举副本，并转换为 上线 状态
+    // 如果分区状态为 新建 或 下线，则重新选举主副本，并转为 上线状态，已经是 在线 状态则不变。
     partitionStateMachine.triggerOnlinePartitionStateChange()
     // check if reassignment of some partitions need to be restarted
     maybeResumeReassignments { (_, assignment) =>
@@ -641,6 +651,7 @@ class KafkaController(val config: KafkaConfig,
     if (deadBrokersThatWereShuttingDown.nonEmpty)
       info(s"Removed ${deadBrokersThatWereShuttingDown.mkString(",")} from list of shutting down brokers.")
     val allReplicasOnDeadBrokers = controllerContext.replicasOnBrokers(deadBrokers.toSet)
+    // 下线逻辑
     onReplicasBecomeOffline(allReplicasOnDeadBrokers)
 
     unregisterBrokerModificationsHandler(deadBrokers)
@@ -1775,6 +1786,7 @@ class KafkaController(val config: KafkaConfig,
       s"bounced brokers: ${bouncedBrokerIdsSorted.mkString(",")}, " +
       s"all live brokers: ${liveBrokerIdsSorted.mkString(",")}")
 
+    // 更新网络通道管理器管理代理节点的信息，用于发送网络请求给服务端节点
     newBrokerAndEpochs.keySet.foreach(controllerChannelManager.addBroker)
     bouncedBrokerIds.foreach(controllerChannelManager.removeBroker)
     bouncedBrokerAndEpochs.keySet.foreach(controllerChannelManager.addBroker)

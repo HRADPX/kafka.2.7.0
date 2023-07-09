@@ -259,6 +259,12 @@ class TopicDeletionManager(config: KafkaConfig,
    *  在 zk /admin/delete_topics/ 下新建要删除的主题  --> 删除主题监听器监听到 zk 节点的改变事件 --> 通过删除主题管理器
    *  和 删除主题的线程 执行删除主题的处理。
    *
+   * 删除主题监听器触发时，将需要删除的主题加入管理器的 待删除集合中（topicsToBeDeleted）。只有主题被成功删除，它才会从 待删除集合 移除。
+   * 否则，如果删除未开始、未完成或删除失败，主题都会一直存在于 待删除集合。管理器允许删除主题，必须同时满足下面三个条件：
+   * 1）主题还没有删除完成，即还在 待删除集合中。
+   * 2）还没有开始删除主题，即不存在任何一个副本状态是 开始删除。
+   * 3）删除主题有效，即不在 无效的主题集合（topicsIneligibleForDeletion）中。
+   *
    * 主题删除后的清理工作有：
    *  1）主题的所有副本状态转换为 不存在
    *  2）主题的所有分区状态转换为 下线
@@ -324,15 +330,16 @@ class TopicDeletionManager(config: KafkaConfig,
     }
 
     // move dead replicas directly to failed state
-    // 下线的副本状态转为 删除失败
+    // 副本所在的节点已经下线了，状态转为 删除失败
     replicaStateMachine.handleStateChanges(allDeadReplicas, ReplicaDeletionIneligible)
     // send stop replica to all followers that are not in the OfflineReplica state so they stop sending fetch requests to the leader
-    // 将需要删除的副本状态转换为 下线
+    // 将需要删除的副本状态转换为 下线（发送停止副本的请求给代理节点，删除标记为 false）
     replicaStateMachine.handleStateChanges(allReplicasForDeletionRetry, OfflineReplica)
-    // 再转换为 开始删除
+    // 再转换为 开始删除，这一步会发送停止副本请求给代理节点，删除标记为 true
     replicaStateMachine.handleStateChanges(allReplicasForDeletionRetry, ReplicaDeletionStarted)
 
     if (allTopicsIneligibleForDeletion.nonEmpty) {
+      // 下线的副本，将副本对应的主题加入 无效的主题集合
       markTopicIneligibleForDeletion(allTopicsIneligibleForDeletion, reason = "offline replicas")
     }
   }

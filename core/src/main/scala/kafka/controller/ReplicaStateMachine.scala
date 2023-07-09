@@ -32,6 +32,10 @@ import scala.collection.{Seq, mutable}
 abstract class ReplicaStateMachine(controllerContext: ControllerContext) extends Logging {
   /**
    * Invoked on successful controller election.
+   * 初始化副本状态机
+   * 存活的副本会初始化为 上线，不存活的副本状态会初始化为 删除失败。接着，状态机还要处理将存活的副本转为 上线
+   * 状态（实际上副本的状态从 上线 转换 上线）
+   * 分区状态机启动时也有类似的操作
    */
   def startup(): Unit = {
     info("Initializing replica state")
@@ -255,16 +259,20 @@ class ZkReplicaStateMachine(config: KafkaConfig,
         }
       case OfflineReplica =>
         validReplicas.foreach { replica =>
+          // 停止副本请求， deletePartition = false，副本状态转换为 下线 和 开始删除，都会发送停止副本的请求给代理节点，不同的是 deletePartition
+          // 这个标记。如果是 下线，还会将要副本在分区的 ISR 集合中移除。而副本状态从 下线 -> 开始删除 则不需要，因为前置状态已经完成了这个动作
           controllerBrokerRequestBatch.addStopReplicaRequestForBrokers(Seq(replicaId), replica.topicPartition, deletePartition = false)
         }
         val (replicasWithLeadershipInfo, replicasWithoutLeadershipInfo) = validReplicas.partition { replica =>
           controllerContext.partitionLeadershipInfo(replica.topicPartition).isDefined
         }
+        // 将副本从分区的 ISR 移除
         val updatedLeaderIsrAndControllerEpochs = removeReplicasFromIsr(replicaId, replicasWithLeadershipInfo.map(_.topicPartition))
         updatedLeaderIsrAndControllerEpochs.forKeyValue { (partition, leaderIsrAndControllerEpoch) =>
           stateLogger.info(s"Partition $partition state changed to $leaderIsrAndControllerEpoch after removing replica $replicaId from the ISR as part of transition to $OfflineReplica")
           if (!controllerContext.isTopicQueuedUpForDeletion(partition.topic)) {
             val recipients = controllerContext.partitionReplicaAssignment(partition).filterNot(_ == replicaId)
+            // 发送更新分区信息请求
             controllerBrokerRequestBatch.addLeaderAndIsrRequestForBrokers(recipients,
               partition,
               leaderIsrAndControllerEpoch,
@@ -290,6 +298,7 @@ class ZkReplicaStateMachine(config: KafkaConfig,
           if (traceEnabled)
             logSuccessfulTransition(stateLogger, replicaId, replica.topicPartition, currentState, ReplicaDeletionStarted)
           controllerContext.putReplicaState(replica, ReplicaDeletionStarted)
+          // 停止副本请求， deletePartition = true
           controllerBrokerRequestBatch.addStopReplicaRequestForBrokers(Seq(replicaId), replica.topicPartition, deletePartition = true)
         }
       case ReplicaDeletionIneligible =>
