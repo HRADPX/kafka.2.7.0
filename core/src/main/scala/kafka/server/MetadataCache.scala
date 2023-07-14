@@ -45,6 +45,7 @@ import org.apache.kafka.common.security.auth.SecurityProtocol
  */
 class MetadataCache(brokerId: Int) extends Logging {
 
+  // 读写锁，适合读多写少的场景
   private val partitionMetadataLock = new ReentrantReadWriteLock()
   //this is the cache state. every MetadataSnapshot instance is immutable, and updates (performed under a lock)
   //replace the value with a completely new one. this means reads (which are not under any lock) need to grab

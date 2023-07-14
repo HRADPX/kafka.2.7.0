@@ -16,14 +16,15 @@
  */
 package org.apache.kafka.common.internals;
 
-import org.apache.kafka.common.errors.InvalidTopicException;
-import org.apache.kafka.common.utils.Utils;
-
 import java.util.Collections;
 import java.util.Set;
 
+import org.apache.kafka.common.errors.InvalidTopicException;
+import org.apache.kafka.common.utils.Utils;
+
 public class Topic {
 
+    // Kafka 内部主题，用于存储消费者提交偏移量和消费组分配的状态数据
     public static final String GROUP_METADATA_TOPIC_NAME = "__consumer_offsets";
     public static final String TRANSACTION_STATE_TOPIC_NAME = "__transaction_state";
     public static final String LEGAL_CHARS = "[a-zA-Z0-9._-]";

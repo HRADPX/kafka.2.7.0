@@ -924,13 +924,17 @@ class GroupCoordinator(val brokerId: Int,
       None
   }
 
+  // 卸载元数据，消费组的协调者发生了改变
   private def onGroupUnloaded(group: GroupMetadata): Unit = {
     group.inLock {
       info(s"Unloading group metadata for ${group.groupId} with generation ${group.generationId}")
       val previousState = group.currentState
+      // 状态设置为失败
       group.transitionTo(Dead)
 
       previousState match {
+        // 之前状态是准备再平衡（协调者还不知道有多少消费者），发送加入响应 给所有消费者，
+        // 让消费者重新加入新的协调者节点，返回 NOT_COORDINATOR 的错误信息
         case Empty | Dead =>
         case PreparingRebalance =>
           for (member <- group.allMemberMetadata) {
@@ -939,6 +943,7 @@ class GroupCoordinator(val brokerId: Int,
 
           joinPurgatory.checkAndComplete(GroupKey(group.groupId))
 
+        // 状态是 稳定 或 完成再平衡（协调者已经知道有多少消费者了），直接返回 同步组响应 给所有消费者即可
         case Stable | CompletingRebalance =>
           for (member <- group.allMemberMetadata) {
             group.maybeInvokeSyncCallback(member, SyncGroupResult(Errors.NOT_COORDINATOR))
@@ -948,14 +953,19 @@ class GroupCoordinator(val brokerId: Int,
     }
   }
 
+  // 加载消费组元数据，这是代理节点发生故障时，控制器重新选举内部主题分区的主副本，并发送 LAI 请求，新的主副本会加载原来
+  // 主副本的消费组元数据信息
   private def onGroupLoaded(group: GroupMetadata): Unit = {
     group.inLock {
       info(s"Loading group metadata for ${group.groupId} with generation ${group.generationId}")
+      // 确保消费组状态已经是稳定状态
       assert(group.is(Stable) || group.is(Empty))
+      // 这里为什么要 rebalance
       if (groupIsOverCapacity(group)) {
         prepareRebalance(group, s"Freshly-loaded group is over capacity ($groupConfig.groupMaxSize). Rebalacing in order to give a chance for consumers to commit offsets")
       }
 
+      //
       group.allMemberMetadata.foreach(completeAndScheduleNextHeartbeatExpiration(group, _))
     }
   }

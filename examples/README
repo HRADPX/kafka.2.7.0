@@ -12,7 +12,7 @@ To run the demo:
       5.2. You could also use Intellij to run the example directly by configuring parameters as "Program arguments"
 
 # 1. 配置环境，需要 gradle（6.6） 和 scala 环境，并配置环境变量，如果要启动服务，还需要配置 Zookeeper
-# 2. 拉下代码到 idea，如果是官方源码，还需要先配置下仓库地址，替换为阿里云仓库
+# 2. 拉下代码到 idea，如果是官方源码，还需要先配置下 pom.xml 中的仓库地址，替换为阿里云仓库
 # 3. 找到项目根目录下的 settings.grade 配置文件，添加到 gradle 工程，开始导入依赖
 # 4. 依赖导入结束后，有些版本会有些包无法导入，需要手动执行执行 gradle wrapper, 生成 gradlew 执行文件，如果是 windows 环境，需要将根目录下
 #   的 wrapper.gradle 文件中的最后一行移除 windows 批处理文件的配置给注释掉，不然在 windows 环境下根目录不会生成 gradlew.bat 批处理文件。
@@ -261,7 +261,20 @@ AR、ISR: 分区的当前副本集以及主副本保持同步的副本集
 因为副本在 AR 中，不一定在 ISR 中，而副本在 ISR 中，一般会在 AR 中。
 
 
+控制器向代理节点发送的请求类型有三种：分区的主副本和 ISR 信息（LAI）、更新元数据（UpdateMetadata）、停止副本（StopReplicas）。代理节点处理这
+三种请求，都会转交给副本管理器执行具体的逻辑。由于这三种请求都会更新分区的副本状态，因此这三个操作都会使用同一个对象锁进行同步。
 
+整体流程：
+1）控制器发送 LAI 请求给分区的所有代理节点，不同代理节点的分区会分别创建分区的主副本或备份副本。主副本会将分区从拉取管理器移除，备份副本会将分区加入
+拉取管理器。
+2）控制器发送 UpdateMetadata 请求给集群所有代理节点。
+3）每个代理节点处理 UpdateMetadata 请求，都会更新元数据缓存。
+4）客户端发送 Metadata 请求，从元数据缓存中获取主题的元数据。
+5）客户端从主题元数据中找出分区的主副本，并和分区的主副本进行通信。
+
+
+切换主副本 日志文件怎么处理的？
+代理节点下线如果处理主分区的？
 
 
 

@@ -568,10 +568,13 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
       // to maintain the decision maker controller's epoch in the zookeeper path
       controllerEpoch = partitionState.controllerEpoch
 
+      // 分区状态的 ISR
       val isr = partitionState.isr.asScala.map(_.toInt).toSet
       val addingReplicas = partitionState.addingReplicas.asScala.map(_.toInt)
+      // 在分区重分配的时候，需要在 TRS 中选择一个主副本，ORS 可能小于 TRS，这时需要移除一些副本
       val removingReplicas = partitionState.removingReplicas.asScala.map(_.toInt)
 
+      // 更新分区对象的 AR，ISR 集合
       updateAssignmentAndIsr(
         assignment = partitionState.replicas.asScala.map(_.toInt),
         isr = isr,
@@ -610,6 +613,8 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
       // would try to query.
       leaderLog.maybeAssignEpochStartOffset(leaderEpoch, leaderEpochStartOffset)
 
+      // 1）原先没有主副本，调用该方法的副本会成为主副本
+      // 2）原先有主副本，但是新的副本和原来的主副本不一致，比如备份副本转为主副本
       val isNewLeader = !isLeader
       val curTimeMs = time.milliseconds
       // initialize lastCaughtUpTime of replicas as well as their lastFetchTimeMs and lastFetchLeaderLogEndOffset.
@@ -622,6 +627,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
         // mark local replica as the leader after converting hw
         leaderReplicaIdOpt = Some(localBrokerId)
         // reset log end offset for remote replicas
+        // 重置远程副本的 LEO
         remoteReplicas.foreach { replica =>
           replica.updateFetchState(
             followerFetchOffsetMetadata = LogOffsetMetadata.UnknownOffsetMetadata,
@@ -657,7 +663,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
 
       updateAssignmentAndIsr(
         assignment = partitionState.replicas.asScala.iterator.map(_.toInt).toSeq,
-        isr = Set.empty[Int],
+        isr = Set.empty[Int], // 备份副本所在的分区没有 ISR 集合
         addingReplicas = partitionState.addingReplicas.asScala.map(_.toInt),
         removingReplicas = partitionState.removingReplicas.asScala.map(_.toInt)
       )
@@ -687,6 +693,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
       if (leaderReplicaIdOpt.contains(newLeaderBrokerId) && leaderEpoch == oldLeaderEpoch) {
         false
       } else {
+        // 更新分区主副本
         leaderReplicaIdOpt = Some(newLeaderBrokerId)
         true
       }
@@ -770,6 +777,21 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
     *                       assignment
    * @param removingReplicas An ordered sequence of all broker ids that will be removed from
     *                         the assignment
+   *
+   * 每个分区对象都会创建分区的所有副本。分区对象从分区状态信息对象中读取所有的副本集，并为每个副本编号创建一个
+   * 对应的副本对象。不过分区创建出来的副本不一定都有日志文件。日志真正存储在代理节点上的物理介质上，只有本地副本
+   * 才有日志。
+   *
+   * 主副本、备份副本、本地副本、远程副本
+   *  和主副本只有一个，备份副本可以有多个一样，本地副本也只有一个，远程副本可以有多个。但是本地副本和主副本、备份副本
+   * 没有必然的联系，本地副本的概念只有结合本地代理节点才有意义。比如分区在当前代理节点上是主副本，那么本地副本就是主
+   * 副本，其他远程副本都是备份副本。分区在当前代理节点上是备份副本，那么本地副本是备份副本，远程副本有一个是主副本，
+   * 其他是备份副本。
+   *
+   * 分区的每个副本（包括主副本和备份副本）在代理节点上，都有一个对应的本地日志文件。对于同一个分区，备份副本会同步
+   * 主副本的日志文件数据，并写入到备份副本自己的本地日志文件中国呢。这样，相同分区的多分副本数据就保持同步了。
+   * 一旦主副本挂掉，控制器会在备份副本中选举一个作为主副本。因为备份副本的日志文件和旧的主副本已经保持数据同步，所以
+   * 选举新的主副本，并不会丢失数据。
    */
   def updateAssignmentAndIsr(assignment: Seq[Int],
                              isr: Set[Int],
@@ -780,6 +802,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
 
     // due to code paths accessing remoteReplicasMap without a lock,
     // first add the new replicas and then remove the old ones
+    // 更新远程副本（没有则创建）
     newRemoteReplicas.foreach(id => remoteReplicasMap.getAndMaybePut(id, new Replica(id, topicPartition)))
     remoteReplicasMap.removeAll(removedReplicas)
 
@@ -787,6 +810,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
       assignmentState = OngoingReassignmentState(addingReplicas, removingReplicas, assignment)
     else
       assignmentState = SimpleAssignmentState(assignment)
+    // ISR
     isrState = CommittedIsr(isr)
   }
 
