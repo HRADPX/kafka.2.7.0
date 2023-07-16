@@ -42,6 +42,33 @@ import org.apache.kafka.common.security.auth.SecurityProtocol
 /**
  *  A cache for the state (e.g., current leader) of each partition. This cache is updated through
  *  UpdateMetadataRequest from the controller. Every broker maintains the same cache, asynchronously.
+ *
+ *  服务端集群每个代理节点的元数据缓存都是一致的，客户端只需向任意一个节点发送元数据请求，就可以获取缓存的元数据，
+ *  并更新客户端元数据对象。客户端的元数据对象保存了集群的配置信息，包括每个分区的主副本。生产者为消息分配不同的
+ *  分区编号，并将不同分区的消息发送到不同的代理节点。正常情况下，如果服务端的分区没有返回错误码，生产者客户端会
+ *  使用已有的元数据对象继续发送生产请求。
+ *
+ *  客户端和服务端交互时，需要更新元数据流程，具体步骤有：
+ *  1）客户端发送请求之前，如果分区的主副本为空，则强制更新元数据。
+ *    生产者在发送生产请求之前，如果分区的主副本不存在，修改更新元数据标记，发送请求在 poll 中完成
+ *    @see org.apache.kafka.clients.producer.internals.Sender#sendProducerData(long)
+ *    消费者在拉取数据时，如果发现分区的主副本不存在，修改更新元数据标记，发送请求在 poll 中完成
+ *    @see org.apache.kafka.clients.consumer.internals.Fetcher#prepareFetchRequests()
+ *  2）服务端处理客户端请求，如果处理过程有错误，为对应的分区返回异常信息。
+ *  3）客户端处理响应结果，如果分区的结果存在异常信息，则强制更新元数据。
+ *    当生产者客户端处理响应时，如果服务端返回无效的元数据信息时，修改更新元数据标记。
+ *   @see org.apache.kafka.clients.producer.internals.Sender#handleProduceResponse(ClientResponse, Map, long)
+ *    -> org.apache.kafka.clients.producer.internals.Sender#completeBatch(ProducerBatch, ProduceResponse.PartitionResponse, long, long)
+ *    当消费者客户端处理响应时，如果服务端返回无效的元数据信息时，修改更新元数据标记。
+ *  @see org.apache.kafka.clients.consumer.internals.Fetcher#fetchedRecords()
+ *    -> org.apache.kafka.clients.consumer.internals.Fetcher#initializeCompletedFetch(CompletedFetch)
+ *    ...
+ *
+ *  客户端除了正常的请求更新元数据，在元数据对象相关方法中还有几种特殊的使用场景：
+ *  1）生产者发送数据前，必须等待元数据更新完成，才会将消息追加到消息收集器。具体参考生产者发送请求流程：
+ *   @see org.apache.kafka.clients.producer.KafkaProducer#doSend(ProducerRecord, Callback)
+ *  2）消费者分配分区之前，必须确保刷新完元数据，才会开始拉取分区的消息集。
+ *   @see org.apache.kafka.clients.consumer.internals.ConsumerCoordinator#poll(Timer, boolean)
  */
 class MetadataCache(brokerId: Int) extends Logging {
 

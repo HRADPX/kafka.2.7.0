@@ -901,8 +901,15 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             try {
                 /**
                  * step 1: 同步等待拉取元数据
-                 *  maxBlockTimeMs: 最多等待时间
+                 *  maxBlockTimeMs: 更新元数据最多等待时间，默认 60s
                  *  waitedOnMetadataMs: 拉取元数据用的时间
+                 *
+                 * 在生产者发送数据之前，必须确保主题有可用的分区。生产者调用 waitOnMetadata 方法会一直阻塞，并唤醒 Sender 线程去发送
+                 * 更新元数据请求，直到元数据完成更新（主题有了分区），它才会继续向下执行，追加消息到记录收集器中。
+                 *
+                 * 生产者只有在第一次发送消息给主题时，因为客户端的元数据对象还没有记录主题中每个分区对应的主副本，所以客户端需要等待更新
+                 * 完元数据后，才可以发送消息给分区的主副本。在第一次发送消息之后，生产者的元数据对象中主题的分区一定不等于空，所以就不会
+                 * 再执行 waitOnMetadata 方法中的循环体了。
                  */
                 clusterAndWaitTime = waitOnMetadata(record.topic(), record.partition(), nowMs, maxBlockTimeMs);
             } catch (KafkaException e) {
@@ -1074,10 +1081,11 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             // 获取当前元数据的版本号
             // 在 Producer 管理元数据的时候，对于它来说元数据是有版本号的。每次成功更新元数据时，都会递增这个版本号。
             int version = metadata.requestUpdateForTopic(topic);
-            // 唤醒 Sender 线程
+            // 唤醒 Sender 线程去发送请求元数据请求
             sender.wakeup();
             try {
                 // 等待元数据，同步等待 Sender 线程获取到的数据
+                // 退出等待的条件有两个：1）元数据完成更新 2）超时
                 metadata.awaitUpdate(version, remainingWaitMs);
             } catch (TimeoutException ex) {
                 // Rethrow with original maxWaitMs to prevent logging exception with remainingWaitMs

@@ -16,37 +16,12 @@
  */
 package org.apache.kafka.clients.producer.internals;
 
-import static org.apache.kafka.common.record.RecordBatch.NO_TIMESTAMP;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-
-import org.apache.kafka.clients.ApiVersions;
-import org.apache.kafka.clients.ClientRequest;
-import org.apache.kafka.clients.ClientResponse;
-import org.apache.kafka.clients.KafkaClient;
-import org.apache.kafka.clients.Metadata;
-import org.apache.kafka.clients.NetworkClient;
-import org.apache.kafka.clients.NetworkClientUtils;
-import org.apache.kafka.clients.RequestCompletionHandler;
+import org.apache.kafka.clients.*;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.AuthenticationException;
-import org.apache.kafka.common.errors.ClusterAuthorizationException;
-import org.apache.kafka.common.errors.InvalidMetadataException;
-import org.apache.kafka.common.errors.RetriableException;
-import org.apache.kafka.common.errors.TimeoutException;
-import org.apache.kafka.common.errors.TopicAuthorizationException;
-import org.apache.kafka.common.errors.TransactionAbortedException;
-import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import org.apache.kafka.common.errors.*;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
 import org.apache.kafka.common.metrics.stats.Max;
@@ -54,14 +29,15 @@ import org.apache.kafka.common.metrics.stats.Meter;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.RecordBatch;
-import org.apache.kafka.common.requests.AbstractRequest;
-import org.apache.kafka.common.requests.FindCoordinatorRequest;
-import org.apache.kafka.common.requests.ProduceRequest;
-import org.apache.kafka.common.requests.ProduceResponse;
-import org.apache.kafka.common.requests.RequestHeader;
+import org.apache.kafka.common.requests.*;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.slf4j.Logger;
+
+import java.io.IOException;
+import java.util.*;
+
+import static org.apache.kafka.common.record.RecordBatch.NO_TIMESTAMP;
 
 /**
  * The background thread that handles the sending of produce requests to the Kafka cluster. This thread makes metadata
@@ -359,7 +335,7 @@ public class Sender implements Runnable {
 
             log.debug("Requesting metadata update due to unknown leader topics from the batched records: {}",
                 result.unknownLeaderTopics);
-            // 标记需要全量更新元数据
+            // 标记需要全量更新元数据，会在调用 poll 方法的时候发送拉取元数据请求
             this.metadata.requestUpdate();
         }
 
@@ -428,12 +404,14 @@ public class Sender implements Runnable {
         pollTimeout = Math.min(pollTimeout, this.accumulator.nextExpiryTimeMs() - now);
         pollTimeout = Math.max(pollTimeout, 0);
 
+        // 如果有主题没有主副本，需要更新元数据，设置 pollTimeout = 0，在后续的 poll 方法中无需阻塞，直接发送请求
         if (!result.readyNodes.isEmpty()) {
             log.trace("Nodes with data ready to send: {}", result.readyNodes);
             // if some partitions are already ready to be sent, the select time would be 0;
             // otherwise if some partition already has some data accumulated but not ready yet,
             // the select time will be the time difference between now and its linger expiry time;
             // otherwise the select time will be the time difference between now and the metadata expiry time;
+
             pollTimeout = 0;
         }
         // 6) batches 就是要发送的数据
@@ -692,6 +670,7 @@ public class Sender implements Runnable {
                     log.warn("Received invalid metadata error in produce request on partition {} due to {}. Going " +
                             "to request metadata update now", batch.topicPartition, error.exception(response.errorMessage).toString());
                 }
+                // 服务端返回错误的元数据信息，需要更新元数据
                 metadata.requestUpdate();
             }
         } else {
