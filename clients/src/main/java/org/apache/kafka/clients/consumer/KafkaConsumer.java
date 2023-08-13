@@ -2496,8 +2496,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * Note: 步骤 3 是异步请求，所以如果消费者开始拉取消息时，可能这些请求还没有完成。
      *
      * todo
-     *  1.上面的流程默认忽略了 AWAIT_VALIDATION 这个状态，因为是从消费者启动这个流程开始，暂时不需要考虑这个状态，后续分析
-     *  2.
+     *  上面的流程默认忽略了 AWAIT_VALIDATION 这个状态，因为是从消费者启动这个流程开始，暂时不需要考虑这个状态
      */
     private boolean updateFetchPositions(final Timer timer) {
         // If any partitions have been truncated due to a leader change, we need to validate the offsets

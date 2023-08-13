@@ -16,17 +16,48 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+
 import org.apache.kafka.clients.GroupRebalanceConfig;
-import org.apache.kafka.clients.consumer.*;
+import org.apache.kafka.clients.consumer.CommitFailedException;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
+import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.Assignment;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.GroupSubscription;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.RebalanceProtocol;
 import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.Subscription;
+import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.OffsetCommitCallback;
+import org.apache.kafka.clients.consumer.RetriableCommitFailedException;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.*;
+import org.apache.kafka.common.errors.FencedInstanceIdException;
+import org.apache.kafka.common.errors.GroupAuthorizationException;
+import org.apache.kafka.common.errors.InterruptException;
+import org.apache.kafka.common.errors.RebalanceInProgressException;
+import org.apache.kafka.common.errors.RetriableException;
+import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.errors.TopicAuthorizationException;
+import org.apache.kafka.common.errors.UnstableOffsetCommitException;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.message.JoinGroupRequestData;
 import org.apache.kafka.common.message.JoinGroupResponseData;
 import org.apache.kafka.common.message.OffsetCommitRequestData;
@@ -39,20 +70,16 @@ import org.apache.kafka.common.metrics.stats.Max;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.RecordBatch;
-import org.apache.kafka.common.requests.*;
+import org.apache.kafka.common.requests.JoinGroupRequest;
+import org.apache.kafka.common.requests.OffsetCommitRequest;
+import org.apache.kafka.common.requests.OffsetCommitResponse;
+import org.apache.kafka.common.requests.OffsetFetchRequest;
+import org.apache.kafka.common.requests.OffsetFetchResponse;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
-
-import java.nio.ByteBuffer;
-import java.util.*;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 /**
  * This class manages the coordination process with the consumer coordinator.
@@ -472,6 +499,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
                 return false;
             }
 
+            // 判断是否需要重新加入消费组
             if (rejoinNeededOrPending()) {
                 // due to a race condition between the initial metadata fetch and the initial rebalance,
                 // we need to ensure that the metadata is fresh before joining initially. This ensures
@@ -796,7 +824,7 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         // we need to rejoin if we performed the assignment and metadata has changed;
         // also for those owned-but-no-longer-existed partitions we should drop them as lost
-        // todo huangran 执行分区分配成功后会 assignmentSnapshot = metadataSnapshot
+        // 执行分区分配成功后会 assignmentSnapshot = metadataSnapshot
         if (assignmentSnapshot != null && !assignmentSnapshot.matches(metadataSnapshot)) {
             log.info("Requesting to re-join the group and trigger rebalance since the assignment metadata has changed from {} to {}",
                     assignmentSnapshot, metadataSnapshot);
@@ -833,7 +861,9 @@ public final class ConsumerCoordinator extends AbstractCoordinator {
 
         // 发送获取偏移量请求（OFFSET_FETCH) 给服务端的协调者节点
         final Map<TopicPartition, OffsetAndMetadata> offsets = fetchCommittedOffsets(initializingPartitions, timer);
-        // 如果获取偏移量请求失败了，offsets = null，这里返回了 false， 上层也是直接返回了 false，但是后续如何处理？ todo huangran
+        // 如果获取偏移量请求失败了，offsets = null，这里返回了 false， 上层也是直接返回了 false，但是后续如何处理？
+        // KafkaConsumer#poll 会循环调用，如果给定的一轮执行时间内，如果本次失败了，下次发现某些分区还是没有拉取偏移量，会重新发送
+        // OFFSET_FETCH 请求。
         if (offsets == null) return false;
 
         // 请求成功

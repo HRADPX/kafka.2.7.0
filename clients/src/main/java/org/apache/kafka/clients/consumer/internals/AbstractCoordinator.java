@@ -491,7 +491,7 @@ public abstract class AbstractCoordinator implements Closeable {
                     // 这里 future.value 的值就是服务端返回的当前消费组分配的分区列表
                     ByteBuffer memberAssignment = future.value().duplicate();
 
-                    // todo huangran 加入消费组成功的操作
+                    // 加入消费组成功会将分配到的分区保存到协调者中
                     onJoinComplete(generationSnapshot.generationId, generationSnapshot.memberId, generationSnapshot.protocolName, memberAssignment);
 
                     // Generally speaking we should always resetJoinGroupFuture once the future is done, but here
