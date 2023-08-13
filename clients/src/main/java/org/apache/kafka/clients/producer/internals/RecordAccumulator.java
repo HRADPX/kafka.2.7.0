@@ -237,6 +237,7 @@ public final class RecordAccumulator {
                 incomplete.add(batch);
 
                 // Don't deallocate this buffer in the finally block as it's being used in the record batch
+                // 这时申请的内存不能释放，因为还在批记录中使用
                 buffer = null;
                 return new RecordAppendResult(future, dq.size() > 1 || batch.isFull(), true, false);
             }

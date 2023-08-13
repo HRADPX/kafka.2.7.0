@@ -467,6 +467,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
      * @param value The record value
      * @param headers The record headers if there are any
      * @return CRC of the record or null if record-level CRC is not supported for the message format
+     * 生产者写入消息 3
      */
     public Long appendWithOffset(long offset, long timestamp, ByteBuffer key, ByteBuffer value, Header[] headers) {
         return appendWithOffset(offset, false, timestamp, key, value, headers);
