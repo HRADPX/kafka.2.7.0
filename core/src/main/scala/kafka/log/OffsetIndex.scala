@@ -64,6 +64,7 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
     extends AbstractIndex(_file, baseOffset, maxIndexSize, writable) {
   import OffsetIndex._
 
+  // 一个索引条目占用 8 字节
   override def entrySize = 8
 
   /* the last offset in the index */
@@ -134,6 +135,7 @@ class OffsetIndex(_file: File, baseOffset: Long, maxIndexSize: Int = -1, writabl
   private def physical(buffer: ByteBuffer, n: Int): Int = buffer.getInt(n * entrySize + 4)
 
   override protected def parseEntry(buffer: ByteBuffer, n: Int): OffsetPosition = {
+    // baseOffset = LogSegment.baseOffset
     OffsetPosition(baseOffset + relativeOffset(buffer, n), physical(buffer, n))
   }
 

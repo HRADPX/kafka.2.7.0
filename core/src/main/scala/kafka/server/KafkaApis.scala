@@ -695,7 +695,9 @@ class KafkaApis(val requestChannel: RequestChannel,           // 请求通道
     }
 
     val erroneous = mutable.ArrayBuffer[(TopicPartition, FetchResponse.PartitionData[Records])]()
+    // 存储要拉取的分区和对应偏移量的映射关系
     val interesting = mutable.ArrayBuffer[(TopicPartition, FetchRequest.PartitionData)]()
+    // follower 同步拉取消息
     if (fetchRequest.isFromFollower) {
       // The follower must have ClusterAction on ClusterResource in order to fetch partition data.
       if (authorize(request.context, CLUSTER_ACTION, CLUSTER, CLUSTER_NAME)) {
@@ -710,6 +712,7 @@ class KafkaApis(val requestChannel: RequestChannel,           // 请求通道
           erroneous += part -> errorResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
         }
       }
+      // 消费者拉取消息
     } else {
       // Regular Kafka consumers need READ permission on each partition they are fetching.
       val partitionDatas = new mutable.ArrayBuffer[(TopicPartition, FetchRequest.PartitionData)]
