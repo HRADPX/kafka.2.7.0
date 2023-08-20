@@ -295,6 +295,7 @@ class Log(@volatile private var _dir: File,
 
   /* the actual segments of the log */
   // 日志管理了所有的日志分段，保存了基准偏移量和日志分段的映射关系，消息最终是通过 Segment 对象保存到日志文件
+  // 数据结构是跳表
   private val segments: ConcurrentNavigableMap[java.lang.Long, LogSegment] = new ConcurrentSkipListMap[java.lang.Long, LogSegment]
 
   // Visible for testing

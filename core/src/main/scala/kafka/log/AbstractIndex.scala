@@ -370,6 +370,7 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
 
   /**
    * Lookup lower and upper bounds for the given target.
+   * @param target 绝对偏移量
    */
   private def indexSlotRangeFor(idx: ByteBuffer, target: Long, searchEntity: IndexSearchEntity): (Int, Int) = {
     // check if the index is empty

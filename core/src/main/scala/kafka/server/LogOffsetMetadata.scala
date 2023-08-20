@@ -39,7 +39,8 @@ object LogOffsetMetadata {
  *  3. the physical position on the located segment        消息在日志分段中的物理位置
  *
  * message offset: 表示下一条消息的偏移量，会随着消息的追加一直发生变化
- * base offset: 同一个 Segment 的 base offset 不会发生变化
+ * base offset: 同一个 Segment 的 base offset 不会发生变化（不一定有值）
+ * relativePositionInSegment: 消息在日志分段中的物理位置（不一定有值）
  */
 case class LogOffsetMetadata(messageOffset: Long,
                              segmentBaseOffset: Long = Log.UnknownOffset,

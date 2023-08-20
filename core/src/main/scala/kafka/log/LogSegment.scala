@@ -54,6 +54,8 @@ import scala.math._
  *
  * 日志分段，由数据文件和索引文件组成。创建新的日志分段，会创建对应的数据文件和索引文件
  * [[kafka.log.LogSegment.open]]
+ *
+ * 索引文件名为日志的基准偏移量，OffsetIndex.baseOffset = LogSegment.baseOffset
  */
 @nonthreadsafe
 class LogSegment private[log] (val log: FileRecords,                         // 数据文件
@@ -80,7 +82,7 @@ class LogSegment private[log] (val log: FileRecords,                         // 
     size > rollParams.maxSegmentBytes - rollParams.messagesSize ||
     // 每隔一段时间都会新建一个，但是一般不用
       (size > 0 && reachedRollMs) ||
-    // 由一定的条件
+    // 有一定的条件，如索引文件满了。canConvertToRelativeOffset 这是为什么
       offsetIndex.isFull || timeIndex.isFull || !canConvertToRelativeOffset(rollParams.maxOffsetInMessages)
   }
 
