@@ -351,7 +351,7 @@ class ReplicaManager(val config: KafkaConfig,
   def startup(): Unit = {
     // start ISR expiration thread
     // A follower can lag behind leader for up to config.replicaLagTimeMaxMs x 1.5 before it is removed from ISR
-    // 定时调度线程——更新 ISR 列表
+    // 定时调度线程——更新 ISR 列表（将长时间没有同步主副本的备份副本从 ISR 列表里移除）
     scheduler.schedule("isr-expiration", maybeShrinkIsr _, period = config.replicaLagTimeMaxMs / 2, unit = TimeUnit.MILLISECONDS)
     // If using AlterIsr, we don't need the znode ISR propagation
     if (!config.interBrokerProtocolVersion.isAlterIsrSupported) {

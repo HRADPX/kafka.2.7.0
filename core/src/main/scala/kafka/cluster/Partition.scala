@@ -582,6 +582,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
         removingReplicas = removingReplicas
       )
       try {
+        // 创建日志对象
         createLogIfNotExists(partitionState.isNew, isFutureReplica = false, highWatermarkCheckpoints)
       } catch {
         case e: ZooKeeperClientException =>
@@ -789,7 +790,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
    * 其他是备份副本。
    *
    * 分区的每个副本（包括主副本和备份副本）在代理节点上，都有一个对应的本地日志文件。对于同一个分区，备份副本会同步
-   * 主副本的日志文件数据，并写入到备份副本自己的本地日志文件中国呢。这样，相同分区的多分副本数据就保持同步了。
+   * 主副本的日志文件数据，并写入到备份副本自己的本地日志文件中。这样，相同分区的多分副本数据就保持同步了。
    * 一旦主副本挂掉，控制器会在备份副本中选举一个作为主副本。因为备份副本的日志文件和旧的主副本已经保持数据同步，所以
    * 选举新的主副本，并不会丢失数据。
    */
