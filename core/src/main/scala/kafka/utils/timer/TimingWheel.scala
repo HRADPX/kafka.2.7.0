@@ -96,7 +96,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * This class is not thread-safe. There should not be any add calls while advanceClock is executing.
  * It is caller's responsibility to enforce it. Simultaneous add calls are thread-safe.
  *
- *
+ * 时间轮
+ * 1. 时间轮持有定时器的延迟队列的引用，添加到时间轮的延迟操作最终还是被添加到延迟队列中。
+ * 2. 超时的定时任务列表会被延迟队列的 poll 方法弹出。定时任务列表超时并不一定表示定时任务超时，如果
  * 1. 时间轮中过期的任务会被立即执行。
  * 2. 在分层的时间轮中，如果当前层的时间单位是 u，那么下层的时间单位是 n * u (n 为 buckets 的数量)
  */
@@ -143,7 +145,7 @@ private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, ta
       false
     } else if (expiration < currentTime + interval) {
       // Put in its own bucket
-      // 过期时间在当前层
+      // 过期时间在当前层，这里会降级
       val virtualId = expiration / tickMs
       // 对应的桶的位置
       val bucket = buckets((virtualId % wheelSize.toLong).toInt)
