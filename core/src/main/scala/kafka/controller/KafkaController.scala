@@ -253,6 +253,12 @@ class KafkaController(val config: KafkaConfig,
    * 4. Starts the partition state machine
    * If it encounters any unexpected exception/error while becoming controller, it resigns as the current controller.
    * This ensures another controller election will be triggered and there will always be an actively serving controller
+   *
+   * 该方法是当前 Controller 成为 leader Controller 后调用，主要会完成:
+   * 1) 实例化 controller 上下文对象，它持有当前 topic，存活的代理节点以及各个分区的主副本的缓存。
+   * 2) 启动 controller 通道管理器
+   * 3) 启动副本状态机和分区状态机
+   * 如果在成为 controller 遇到任何错误或异常，当前 controller 会取消主 controller 身份，这会触发另一个 controller 选举
    */
   private def onControllerFailover(): Unit = {
     maybeSetupFeatureVersioning()
@@ -1706,7 +1712,7 @@ class KafkaController(val config: KafkaConfig,
 
     // 首次启动
     try {
-      // 在 zk 上创建目录
+      // 在 zk 上创建目录，这里可能会有多个代理节点来竞争，但是只有一个会成功，失败的会抛出异常被捕获
       val (epoch, epochZkVersion) = zkClient.registerControllerAndIncrementControllerEpoch(config.brokerId)
       controllerContext.epoch = epoch
       controllerContext.epochZkVersion = epochZkVersion
