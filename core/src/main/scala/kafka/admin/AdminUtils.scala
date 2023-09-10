@@ -99,6 +99,34 @@ object AdminUtils extends Logging {
    * @throws AdminOperationException If rack information is supplied but it is incomplete, or if it is not possible to
    *                                 assign each replica to a unique rack.
    *
+   * 副本分配的3个原则：
+   * 1）副本均匀的分配到所有的 broker 节点上。
+   * 2）同一个分区的不同副本不能在同一个 broker 节点上。
+   * 3) 如果所有的 broker 节点都有 rack 信息，尽可能分配每个分区的不同副本到不同的 rack 上。
+   *
+   * 实现逻辑：
+   * 1）从代理节点列表的随机位置通过轮询的方式为每个分区分配第一个副本。
+   * 2）通过偏移量为分区分配剩余的副本。
+   *
+   * eg: 有 5 个 broker(0-4)，10个分区（P0-P9），每个分区 3 个副本，对于无 rack 的分配逻辑是：
+   * 每个分区的第一个副本从某一个随机的代理节点开始按照轮询方式进行分配，假设随机出来的节点是 0，则每个分区第一个副本的分配结果如下:
+   * [p0:0, p1:1, p2:2, p3:3, p4:4, p5:0, p6:1, p7:2, p8:3, p9:4]
+   * 对于分区剩下的副本分配，有一个 nextReplicaShift 来控制第二个副本的开始位置，然后按序确定剩下所有副本。每当分区的第一个副本完成一轮循环后，
+   * nextReplicaShift 会自增，目的是尽可能避免出现一样的副本序号。假设 nextReplicaShift 的初始值为 0，则剩下的副本分配结果如下：
+   * p0: 0, 1, 2    nextReplicaShift = 0
+   * p1: 1, 2, 3
+   * p2: 2, 3, 4
+   * p3: 3, 4, 0
+   * p4: 4, 0, 1
+   * p5: 0, 2, 3    nextReplicaShift = 1（到 p5 的第一个副本，代理节点已经完成一次轮询，偏移量自增）
+   * p6: 1, 3, 4
+   * p7: 2, 4, 0
+   * p8: 3, 0, 1
+   * p9: 4, 1, 2
+   *
+   * 每次完成轮询完一轮后，nextReplicaShift 都会增加，目的是尽可能避免出现一样的副本序号。
+   *
+   * 返回 <partitionId, brokerIdList>
    */
   def assignReplicasToBrokers(brokerMetadatas: Seq[BrokerMetadata],
                               nPartitions: Int,
@@ -122,6 +150,9 @@ object AdminUtils extends Logging {
     }
   }
 
+  /**
+   * 无 rack 的副本分配逻辑
+   */
   private def assignReplicasToBrokersRackUnaware(nPartitions: Int,
                                                  replicationFactor: Int,
                                                  brokerList: Seq[Int],
@@ -129,17 +160,24 @@ object AdminUtils extends Logging {
                                                  startPartitionId: Int): Map[Int, Seq[Int]] = {
     val ret = mutable.Map[Int, Seq[Int]]()
     val brokerArray = brokerList.toArray
+    // 开始索引（第一个分区的第一个副本的索引，默认是没有指定，会使用代理节点中的随机一个）
     val startIndex = if (fixedStartIndex >= 0) fixedStartIndex else rand.nextInt(brokerArray.length)
+    // 开始的分区id，从哪个分区开始分配副本，默认是 0
     var currentPartitionId = math.max(0, startPartitionId)
+    // 偏移量
     var nextReplicaShift = if (fixedStartIndex >= 0) fixedStartIndex else rand.nextInt(brokerArray.length)
     for (_ <- 0 until nPartitions) {
+      // 走完一轮后，第二个副本偏移量自增
       if (currentPartitionId > 0 && (currentPartitionId % brokerArray.length == 0))
         nextReplicaShift += 1
+      // 当前分区第一个分配的副本（startIndex 具有随机性，这里第一个副本是可用副本里随机的一个）
       val firstReplicaIndex = (currentPartitionId + startIndex) % brokerArray.length
       val replicaBuffer = mutable.ArrayBuffer(brokerArray(firstReplicaIndex))
+      // 分区的第一个副本分配完成，开始分配剩下的副本（replicationFactor：分区的副本数量）
       for (j <- 0 until replicationFactor - 1)
         replicaBuffer += brokerArray(replicaIndex(firstReplicaIndex, nextReplicaShift, j, brokerArray.length))
       ret.put(currentPartitionId, replicaBuffer)
+      // 下一个分区
       currentPartitionId += 1
     }
     ret

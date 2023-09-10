@@ -582,7 +582,7 @@ class Partition(val topicPartition: TopicPartition,                   // 分区
         removingReplicas = removingReplicas
       )
       try {
-        // 创建日志对象
+        // 创建日志对象，保存分区到 Log 映射关系到 LogManager 中
         createLogIfNotExists(partitionState.isNew, isFutureReplica = false, highWatermarkCheckpoints)
       } catch {
         case e: ZooKeeperClientException =>

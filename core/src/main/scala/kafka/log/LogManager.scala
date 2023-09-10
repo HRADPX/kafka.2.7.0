@@ -820,7 +820,7 @@ class LogManager(logDirs: Seq[File],
         // 日志目录
         val logDir = logDirs
           .iterator // to prevent actually mapping the whole list, lazy map
-          .map(createLogDirectory(_, logDirName))
+          .map(createLogDirectory(_, logDirName))  // 创建分区数据目录
           .find(_.isSuccess)
           .getOrElse(Failure(new KafkaStorageException("No log directories available. Tried " + logDirs.map(_.getAbsolutePath).mkString(", "))))
           .get // If Failure, will throw

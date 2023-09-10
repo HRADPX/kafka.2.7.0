@@ -47,13 +47,16 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
    * @param replicationFactor Replication factor
    * @param topicConfig  topic configs
    * @param rackAwareMode
+   * 无分区分配的创建主题方法
    */
   def createTopic(topic: String,
                   partitions: Int,
                   replicationFactor: Int,
                   topicConfig: Properties = new Properties,
                   rackAwareMode: RackAwareMode = RackAwareMode.Enforced): Unit = {
+    // 获取代理节点列表
     val brokerMetadatas = getBrokerMetadatas(rackAwareMode)
+    // 执行分区分配，返回分区id到分配的副本集合的映射关系
     val replicaAssignment = AdminUtils.assignReplicasToBrokers(brokerMetadatas, partitions, replicationFactor)
     createTopicWithAssignment(topic, topicConfig, replicaAssignment)
   }
@@ -95,6 +98,7 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
                                 config: Properties,
                                 partitionReplicaAssignment: Map[Int, Seq[Int]],
                                 validate: Boolean = true): Unit = {
+    // 校验
     if (validate)
       validateTopicCreate(topic, partitionReplicaAssignment, config)
 
@@ -156,10 +160,12 @@ class AdminZkClient(zkClient: KafkaZkClient) extends Logging {
 
   private def writeTopicPartitionAssignment(topic: String, replicaAssignment: Map[Int, ReplicaAssignment], isUpdate: Boolean): Unit = {
     try {
+      // key: (topic,partitionId), value: replicas
       val assignment = replicaAssignment.map { case (partitionId, replicas) => (new TopicPartition(topic,partitionId), replicas) }.toMap
 
       // 写 zk 节点（/brokers/topics/[topic]），这个会触发 TopicChange 事件，对应的监听器 TopicChangeHandler
-      // （broker 启动时调用 elect() -> onControllerFailover()），最终会调用 processTopicChange() 方法
+      // （broker 启动时调用 elect() -> onControllerFailover()），最终会调用 processTopicChange() 方法来将
+      // zk 里主题的分区信息以及副本分配信息同步到控制器上下文中
       if (!isUpdate) {
         zkClient.createTopicAssignment(topic, assignment.map { case (k, v) => k -> v.replicas })
       } else {

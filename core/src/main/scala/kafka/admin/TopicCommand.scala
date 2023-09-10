@@ -92,10 +92,10 @@ object TopicCommand extends Logging {
   }
 
   class CommandTopicPartition(opts: TopicCommandOptions) {
-    val name: String = opts.topic.get
-    val partitions: Option[Integer] = opts.partitions
-    val replicationFactor: Option[Integer] = opts.replicationFactor
-    val replicaAssignment: Option[Map[Int, List[Int]]] = opts.replicaAssignment
+    val name: String = opts.topic.get                                           // topic 名称
+    val partitions: Option[Integer] = opts.partitions                           // 分区数量
+    val replicationFactor: Option[Integer] = opts.replicationFactor             // 副本的个数
+    val replicaAssignment: Option[Map[Int, List[Int]]] = opts.replicaAssignment // 是否手动指定分区分配
     val configsToAdd: Properties = parseTopicConfigsToBeAdded(opts)
     val configsToDelete: Seq[String] = parseTopicConfigsToBeDeleted(opts)
     val rackAwareMode: RackAwareMode = opts.rackAwareMode
@@ -383,9 +383,10 @@ object TopicCommand extends Logging {
       val adminZkClient = new AdminZkClient(zkClient)
       try {
         if (topic.hasReplicaAssignment) {
-          // 创建 topic
+          // 创建 topic，手动指定分配结果（直接看下面的方法）
           adminZkClient.createTopicWithAssignment(topic.name, topic.configsToAdd, topic.replicaAssignment.get)
         } else
+          // 创建 topic，没有指定分配结果，分配完后还是会调用上面的有分配结果的方法
           adminZkClient.createTopic(topic.name, topic.partitions.get, topic.replicationFactor.get, topic.configsToAdd, topic.rackAwareMode)
         println(s"Created topic ${topic.name}.")
       } catch  {

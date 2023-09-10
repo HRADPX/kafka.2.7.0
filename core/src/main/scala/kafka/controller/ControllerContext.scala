@@ -91,7 +91,9 @@ class ControllerContext {
   private val partitionLeadershipInfo = mutable.Map.empty[TopicPartition, LeaderIsrAndControllerEpoch]
   // 存储正在执行重分配的分区
   val partitionsBeingReassigned = mutable.Set.empty[TopicPartition]
+  // 分区状态，保存分区和分区状态的映射
   val partitionStates = mutable.Map.empty[TopicPartition, PartitionState]
+  // 副本状态，保存副本和副本状态的映射
   val replicaStates = mutable.Map.empty[PartitionAndReplica, ReplicaState]
   val replicasOnOfflineDirs = mutable.Map.empty[Int, Set[TopicPartition]]
 

@@ -2743,7 +2743,7 @@ object Log {
   /**
    * Parse the topic and partition out of the directory name of a log
    * 一个日志的目录对应一个分区
-   * 可以从分区的目录中解析出对应分区的分区对象（TopicAndParition）
+   * 可以从分区的目录中解析出对应分区的分区对象（TopicAndPartition）
    */
   def parseTopicPartitionName(dir: File): TopicPartition = {
     if (dir == null)
