@@ -152,6 +152,11 @@ object AdminUtils extends Logging {
 
   /**
    * 无 rack 的副本分配逻辑
+   * @param nPartitions: 主题分区个数
+   * @param replicationFactor：分区的副本数量
+   * @param brokerList：代理节点列表
+   * @param fixedStartIndex：分配给第一个分区的副本下标
+   * @param startPartitionId：第一个要分配副本的分区编号
    */
   private def assignReplicasToBrokersRackUnaware(nPartitions: Int,
                                                  replicationFactor: Int,
