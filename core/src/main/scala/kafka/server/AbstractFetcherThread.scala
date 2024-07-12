@@ -121,7 +121,7 @@ abstract class AbstractFetcherThread(name: String,
 
   private def maybeFetch(): Unit = {
     val fetchRequestOpt = inLock(partitionMapLock) {
-      // 构建请求，备份副本会带上自己的 brokerId
+      // 构建请求，备份副本会带上自己的 brokerId 和 LEO
       val ResultWithPartitions(fetchRequestOpt, partitionsWithError) = buildFetch(partitionStates.partitionStateMap.asScala)
 
       handlePartitionsWithErrors(partitionsWithError, "maybeFetch")
@@ -301,7 +301,7 @@ abstract class AbstractFetcherThread(name: String,
 
     try {
       trace(s"Sending fetch request $fetchRequest")
-      // 从 leader 服务器拉取数据
+      // 从 leader 服务器同步拉取数据
       /** [[kafka.server.ReplicaFetcherThread.fetchFromLeader(org.apache.kafka.common.requests.FetchRequest.Builder)]] */
       responseData = fetchFromLeader(fetchRequest)
     } catch {
@@ -594,8 +594,14 @@ abstract class AbstractFetcherThread(name: String,
      * In such a case, truncate the current follower's log to the current leader's end offset and continue fetching.
      *
      * There is a potential for a mismatch between the logs of the two replicas here. We don't fix this mismatch as of now.
+     *
+     * 在开启 unclean 选举时，当主副本下线并且 ISR 队列为空时，会从 AR 列表中选举一个副本作为主副本，后续生产者的消息都会追加到新的主副本中，
+     * 如果此时原来的主副本上线，它会作为备份副本，如果发现主副本的 LEO 小于自己的 LEO，在这种情况下，它会截断自己的 LEO 到主副本的 LEO 的，并
+     * 继续同步主副本。
+     * 这可能会导致副本的数据不一致。
      */
     val leaderEndOffset = fetchLatestOffsetFromLeader(topicPartition, currentLeaderEpoch)
+    // leader LEO < follower LEO
     if (leaderEndOffset < replicaEndOffset) {
       warn(s"Reset fetch offset for partition $topicPartition from $replicaEndOffset to current " +
         s"leader's latest offset $leaderEndOffset")
@@ -624,7 +630,11 @@ abstract class AbstractFetcherThread(name: String,
        *
        * Putting the two cases together, the follower should fetch from the higher one of its replica log end offset
        * and the current leader's log start offset.
+       *
+       * todo huangran leader epoch 机制
+       * 下面两种情况下，主副本的 LEO 大于备份副本的 LEO：
        */
+      // leader LEO > follower LEO
       val leaderStartOffset = fetchEarliestOffsetFromLeader(topicPartition, currentLeaderEpoch)
       warn(s"Reset fetch offset for partition $topicPartition from $replicaEndOffset to current " +
         s"leader's start offset $leaderStartOffset")

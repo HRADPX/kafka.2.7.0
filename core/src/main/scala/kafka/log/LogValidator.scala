@@ -79,15 +79,15 @@ private[log] object LogValidator extends Logging {
    */
   private[log] def validateMessagesAndAssignOffsets(records: MemoryRecords,
                                                     topicPartition: TopicPartition,
-                                                    offsetCounter: LongRef,
+                                                    offsetCounter: LongRef,       // 消息起始偏移量
                                                     time: Time,
-                                                    now: Long,
+                                                    now: Long,                    // 当前时间戳
                                                     sourceCodec: CompressionCodec,
                                                     targetCodec: CompressionCodec,
                                                     compactedTopic: Boolean,
                                                     magic: Byte,
-                                                    timestampType: TimestampType,
-                                                    timestampDiffMaxMs: Long,
+                                                    timestampType: TimestampType, // 时间戳类型，默认创建时间作为时间戳
+                                                    timestampDiffMaxMs: Long,     // 最大的时间戳差值，默认 Long 的最大值
                                                     partitionLeaderEpoch: Int,
                                                     origin: AppendOrigin,
                                                     interBrokerProtocolVersion: ApiVersion,
@@ -100,6 +100,7 @@ private[log] object LogValidator extends Logging {
       else {
         // Do in-place validation, offset assignment and maybe set timestamp
         // 默认不压缩，走这里
+        // timestampType 类型默认是创建时间
         assignOffsetsNonCompressed(records, topicPartition, offsetCounter, now, compactedTopic, timestampType, timestampDiffMaxMs,
           partitionLeaderEpoch, origin, magic, brokerTopicStats)
       }
@@ -270,7 +271,7 @@ private[log] object LogValidator extends Logging {
 
   def assignOffsetsNonCompressed(records: MemoryRecords,
                                          topicPartition: TopicPartition,
-                                         offsetCounter: LongRef,
+                                         offsetCounter: LongRef,          // 当前批次消息的起始偏移量
                                          now: Long,
                                          compactedTopic: Boolean,
                                          timestampType: TimestampType,
@@ -279,29 +280,38 @@ private[log] object LogValidator extends Logging {
                                          origin: AppendOrigin,
                                          magic: Byte,
                                          brokerTopicStats: BrokerTopicStats): ValidationAndOffsetAssignResult = {
+    // 记录这次消息集的最大时间戳
     var maxTimestamp = RecordBatch.NO_TIMESTAMP
+    // 记录这次消息集的最大偏移量
     var offsetOfMaxTimestamp = -1L
+    // 这次消息集的起始偏移量
     val initialOffset = offsetCounter.value
 
     // 获取第一个消息批次，magic >= 2 也只有一个批次
+    // MemoryRecords -> 包含多个 DefaultRecordBatch -> DefaultBatch(s)
+    // 对于 MAGIC_VALUE_V2 版本，实际只有一个 DefaultRecordBatch
     val firstBatch = getFirstBatchAndMaybeValidateNoMoreBatches(records, NoCompressionCodec)
 
     records.batches.forEach { batch =>
       // 校验第各个批次
       validateBatch(topicPartition, firstBatch, batch, origin, magic, brokerTopicStats)
 
+      // 当前批的最大时间戳
       var maxBatchTimestamp = RecordBatch.NO_TIMESTAMP
+      // 当前批的最大偏移量
       var offsetOfMaxBatchTimestamp = -1L
 
       val recordErrors = new ArrayBuffer[ApiRecordError](0)
       // this is a hot path and we want to avoid any unnecessary allocations.
       var batchIndex = 0
+      // 每个批次多条记录
       batch.forEach { record =>
         validateRecord(batch, topicPartition, record, batchIndex, now, timestampType,
           timestampDiffMaxMs, compactedTopic, brokerTopicStats).foreach(recordError => recordErrors += recordError)
 
         val offset = offsetCounter.getAndIncrement()
         if (batch.magic > RecordBatch.MAGIC_VALUE_V0 && record.timestamp > maxBatchTimestamp) {
+          // 更新这批消息的最大时间戳和偏移量
           maxBatchTimestamp = record.timestamp
           offsetOfMaxBatchTimestamp = offset
         }
@@ -311,6 +321,7 @@ private[log] object LogValidator extends Logging {
       processRecordErrors(recordErrors)
 
       if (batch.magic > RecordBatch.MAGIC_VALUE_V0 && maxBatchTimestamp > maxTimestamp) {
+        // 更新最大时间戳和偏移量
         maxTimestamp = maxBatchTimestamp
         offsetOfMaxTimestamp = offsetOfMaxBatchTimestamp
       }
@@ -329,6 +340,7 @@ private[log] object LogValidator extends Logging {
       }
     }
 
+    // 日志生成时间作为最大时间，默认不走这个逻辑
     if (timestampType == TimestampType.LOG_APPEND_TIME) {
       maxTimestamp = now
       if (magic >= RecordBatch.MAGIC_VALUE_V2)
@@ -339,8 +351,8 @@ private[log] object LogValidator extends Logging {
 
     ValidationAndOffsetAssignResult(
       validatedRecords = records,
-      maxTimestamp = maxTimestamp,
-      shallowOffsetOfMaxTimestamp = offsetOfMaxTimestamp,
+      maxTimestamp = maxTimestamp,                             // 最大时间戳
+      shallowOffsetOfMaxTimestamp = offsetOfMaxTimestamp,      // 最大偏移量级
       messageSizeMaybeChanged = false,
       recordConversionStats = RecordConversionStats.EMPTY)
   }
@@ -382,6 +394,7 @@ private[log] object LogValidator extends Logging {
     // 压缩编码不一致，不能压缩
     var inPlaceAssignment = sourceCodec == targetCodec
 
+    // 记录这批消息的最大时间戳
     var maxTimestamp = RecordBatch.NO_TIMESTAMP
     val expectedInnerOffset = new LongRef(0)
     val validatedRecords = new mutable.ArrayBuffer[Record]
@@ -552,6 +565,7 @@ private[log] object LogValidator extends Logging {
                                 now: Long,
                                 timestampType: TimestampType,
                                 timestampDiffMaxMs: Long): Option[ApiRecordError] = {
+    // 检验下时间戳差值，默认无限制
     if (timestampType == TimestampType.CREATE_TIME
       && record.timestamp != RecordBatch.NO_TIMESTAMP
       && math.abs(record.timestamp - now) > timestampDiffMaxMs)

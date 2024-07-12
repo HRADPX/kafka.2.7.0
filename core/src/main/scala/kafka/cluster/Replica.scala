@@ -45,6 +45,7 @@ class Replica(val brokerId: Int, val topicPartition: TopicPartition) extends Log
 
   // lastCaughtUpTimeMs is the largest time t such that the offset of most recent FetchRequest from this follower >=
   // the LEO of leader at time t. This is used to determine the lag of this follower and ISR of this partition.
+  // 用于判断备份副本是否在规定时间内从主副本拉取数据
   @volatile private[this] var _lastCaughtUpTimeMs = 0L
 
   def logStartOffset: Long = _logStartOffset

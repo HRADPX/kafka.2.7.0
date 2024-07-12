@@ -157,8 +157,8 @@ class LogSegment private[log] (val log: FileRecords,                         // 
    */
   @nonthreadsafe
   def append(largestOffset: Long,
-             largestTimestamp: Long,
-             shallowOffsetOfMaxTimestamp: Long,
+             largestTimestamp: Long,                // 消息里的最大时间戳
+             shallowOffsetOfMaxTimestamp: Long,     // 消息里最大时间戳消息对应的偏移量
              records: MemoryRecords): Unit = {
     if (records.sizeInBytes > 0) {
       trace(s"Inserting ${records.sizeInBytes} bytes at end offset $largestOffset at position ${log.sizeInBytes} " +
@@ -176,15 +176,18 @@ class LogSegment private[log] (val log: FileRecords,                         // 
       trace(s"Appended $appendedBytes to ${log.file} at end offset $largestOffset")
       // Update the in memory max timestamp and corresponding offset.
       if (largestTimestamp > maxTimestampSoFar) {
+        // 更新最大时间戳
         maxTimestampSoFar = largestTimestamp
         offsetOfMaxTimestampSoFar = shallowOffsetOfMaxTimestamp
       }
       // append an entry to the index (if needed)
       // 写索引（稀疏），不是来一条数据就写一下索引，而是达到一定条件才会去索引（为了可以快速根据偏移量定位到消息在数据文件中的位置）
-      // 默认当写了 4096 字节的时候就会写一条索引
+      // 默认当写了 4K（4096）字节的时候就会写一条索引
       if (bytesSinceLastIndexEntry > indexIntervalBytes) {
         // 写索引，largestOffset: 追加消息集的起始偏移量， physicalPosition: 第一条消息在数据文件中的物理位置
         offsetIndex.append(largestOffset, physicalPosition)
+        // 只有时间戳和 offset 均大于最后一个 entry 对应的值，才写这时间索引
+        // 时间戳 -> 偏移量
         timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestampSoFar)
         bytesSinceLastIndexEntry = 0
       }

@@ -268,6 +268,7 @@ class ReplicaFetcherThread(name: String,
       if (fetchState.isReadyForFetch && !shouldFollowerThrottle(quota, fetchState, topicPartition)) {
         try {
           val logStartOffset = this.logStartOffset(topicPartition)
+          // 副本拉取请求带上 LEO，这个 LEO 维护在 PartitionFetchState 中？
           builder.add(topicPartition, new FetchRequest.PartitionData(
             fetchState.fetchOffset, logStartOffset, fetchSize, Optional.of(fetchState.currentLeaderEpoch)))
         } catch {

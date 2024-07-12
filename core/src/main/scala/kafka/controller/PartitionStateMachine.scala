@@ -61,6 +61,7 @@ abstract class PartitionStateMachine(controllerContext: ControllerContext) exten
    */
   def triggerOnlinePartitionStateChange(): Unit = {
     // 只对新建和下线的分区的状态转换为上线状态，并通过 OfflinePartitionSelector 为分区选出一个主副本。
+    // 获取新建和下线的分区
     val partitions = controllerContext.partitionsInStates(Set(OfflinePartition, NewPartition))
     triggerOnlineStateChangeForPartitions(partitions)
   }
@@ -73,6 +74,7 @@ abstract class PartitionStateMachine(controllerContext: ControllerContext) exten
   private def triggerOnlineStateChangeForPartitions(partitions: collection.Set[TopicPartition]): Unit = {
     // try to move all partitions in NewPartition or OfflinePartition state to OnlinePartition state except partitions
     // that belong to topics to be deleted
+    // 滤掉被分区已经被删除的副本
     val partitionsToTrigger = partitions.filter { partition =>
       !controllerContext.isTopicQueuedUpForDeletion(partition.topic)
     }.toSeq
@@ -168,6 +170,7 @@ class ZkPartitionStateMachine(config: KafkaConfig,
           targetState,
           partitionLeaderElectionStrategyOpt
         )
+        // 同步消息给其他节点...
         controllerBrokerRequestBatch.sendRequestsToBrokers(controllerContext.epoch)
         result
       } catch {
@@ -273,6 +276,7 @@ class ZkPartitionStateMachine(config: KafkaConfig,
         validPartitions.foreach { partition =>
           if (traceEnabled)
             stateChangeLog.trace(s"Changed partition $partition state from ${partitionState(partition)} to $targetState")
+          // 更新分区的状态
           controllerContext.putPartitionState(partition, OfflinePartition)
         }
         Map.empty
@@ -495,6 +499,7 @@ class ZkPartitionStateMachine(config: KafkaConfig,
   ): Seq[(TopicPartition, Option[LeaderAndIsr], Boolean)] = {
     val (partitionsWithNoLiveInSyncReplicas, partitionsWithLiveInSyncReplicas) = leaderAndIsrs.partition {
       case (partition, leaderAndIsr) =>
+        // isr
         val liveInSyncReplicas = leaderAndIsr.isr.filter(controllerContext.isReplicaOnline(_, partition))
         liveInSyncReplicas.isEmpty
     }

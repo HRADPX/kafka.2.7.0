@@ -246,6 +246,7 @@ class ReplicaManager(val config: KafkaConfig,
   /* epoch of the controller that last changed the leader */
   @volatile var controllerEpoch: Int = KafkaController.InitialControllerEpoch
   private val localBrokerId = config.brokerId
+  // 当前副本所有的分区
   private val allPartitions = new Pool[TopicPartition, HostedPartition](
     valueFactory = Some(tp => HostedPartition.Online(Partition(tp, time, this)))
   )
@@ -1122,7 +1123,7 @@ class ReplicaManager(val config: KafkaConfig,
         val isReassignmentFetch = isFromFollower && isAddingReplica(tp, replicaId)
         tp -> FetchPartitionData(
           result.error,
-          result.highWatermark,
+          result.highWatermark,         // 主副本分区的 HW
           result.leaderLogStartOffset,
           result.info.records,
           result.divergingEpoch,
@@ -1692,6 +1693,7 @@ class ReplicaManager(val config: KafkaConfig,
     try {
       // TODO: Delete leaders from LeaderAndIsrRequest
       partitionStates.forKeyValue { (partition, partitionState) =>
+        // 主副本的 brokerId
         val newLeaderBrokerId = partitionState.leader
         try {
           metadataCache.getAliveBrokers.find(_.id == newLeaderBrokerId) match {
@@ -1730,7 +1732,7 @@ class ReplicaManager(val config: KafkaConfig,
         }
       }
 
-      // 先将分区从拉取管理器中移除，主要针对 主副本转为备份副本的场景
+      // 先将分区从拉取管理器中移除，主要针对主副本转为备份副本的场景
       replicaFetcherManager.removeFetcherForPartitions(partitionsToMakeFollower.map(_.topicPartition))
       stateChangeLogger.info(s"Stopped fetchers as part of become-follower request from controller $controllerId " +
         s"epoch $controllerEpoch with correlation id $correlationId for ${partitionsToMakeFollower.size} partitions")
@@ -1753,11 +1755,13 @@ class ReplicaManager(val config: KafkaConfig,
         val partitionsToMakeFollowerWithLeaderAndOffset = partitionsToMakeFollower.map { partition =>
           val leader = metadataCache.getAliveBrokers.find(_.id == partition.leaderReplicaIdOpt.get).get
             .brokerEndPoint(config.interBrokerListenerName)
+          // fetchOffset: 主副本的高水位
           val fetchOffset = partition.localLogOrException.highWatermark
           partition.topicPartition -> InitialFetchState(leader, partition.getLeaderEpoch, fetchOffset)
        }.toMap
 
         // 添加 follower partition 去 leader partition 拉取数据
+        // 4. 为了保证数据的一致性，备份副本将 HW 之后的数据截断，以主副本的 HW 作为新的 LEO 从主副本拉取数据
         replicaFetcherManager.addFetcherForPartitions(partitionsToMakeFollowerWithLeaderAndOffset)
       }
     } catch {
@@ -1807,7 +1811,7 @@ class ReplicaManager(val config: KafkaConfig,
       } else {
         nonOfflinePartition(topicPartition) match {
           case Some(partition) =>
-            // 更新备份副本的偏移量数据
+            // 更新备份副本的偏移量数据（LEO)
             if (partition.updateFollowerFetchState(followerId,
               followerFetchOffsetMetadata = readResult.info.fetchOffsetMetadata,    // 拉取到的偏移量信息
               followerStartOffset = readResult.followerLogStartOffset,

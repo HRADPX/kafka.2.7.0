@@ -52,9 +52,12 @@ public class GroupRebalanceConfig {
         // Consumer and Connect use different config names for defining rebalance timeout
         if (protocolType == ProtocolType.CONSUMER) {
             // 默认为 300s
+            // 两次调用 poll 方法的间隔
             this.rebalanceTimeoutMs = config.getInt(CommonClientConfigs.MAX_POLL_INTERVAL_MS_CONFIG);
         } else {
             // 默认为 60s
+            // rebalance 时消费者加入消费组的最大时间，包含刷新数据和提交偏移量，如果超时，会从消费组里删除，这会导致偏移量提交失败，导致重复消费。
+            // 具体逻辑
             this.rebalanceTimeoutMs = config.getInt(CommonClientConfigs.REBALANCE_TIMEOUT_MS_CONFIG);
         }
 

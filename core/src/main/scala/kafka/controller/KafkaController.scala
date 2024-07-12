@@ -1842,6 +1842,7 @@ class KafkaController(val config: KafkaConfig,
       onBrokerStartup(bouncedBrokerIdsSorted)
     }
     // deadBrokerIds 宕机的 id 不为空，表示有 broker 离开集群
+    // 这里如果下线的副本是主副本，会重新选举新的副本
     if (deadBrokerIds.nonEmpty) {
       controllerContext.removeLiveBrokers(deadBrokerIds)
       onBrokerFailure(deadBrokerIdsSorted)

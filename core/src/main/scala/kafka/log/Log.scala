@@ -288,7 +288,7 @@ class Log(@volatile private var _dir: File,
    * prevent the log start offset (which is exposed in fetch responses) from getting ahead of the high watermark.
    */
   // HW，该值是 ISR 列表里 replica 的 LEO 的最小值，表示在 HW 值之前的数据消费者才能看到（因为所有的副本都已经完成同步）
-  // 会有一个定时的任务会更新的 ISR 列表，如果有 replica 长时间（默认 10s）没有去 leader partition 去更新数据，会将
+  // 会有一个定时的任务会更新的 ISR 列表，如果有 replica 长时间（默认 30s）没有去 leader partition 去更新数据，会将
   // 该 replica 从 ISR 列表中移除出去。因为如果其他的 replica 都完成的数据的同步，只有某个 replica 的没有同步，会导致
   // 消费者可见的数据受到这个最小的 LEO 影响。
   @volatile private var highWatermarkMetadata: LogOffsetMetadata = LogOffsetMetadata(logStartOffset)
@@ -376,6 +376,7 @@ class Log(@volatile private var _dir: File,
       logEndOffset
     else
       hw
+    // 更新 HW
     updateHighWatermarkMetadata(LogOffsetMetadata(newHighWatermark))
     newHighWatermark
   }
@@ -1127,17 +1128,18 @@ class Log(@volatile private var _dir: File,
           val now = time.milliseconds
           val validateAndOffsetAssignResult = try {
             // 基于起始偏移量，为所有有效的消息集中的每条消息重新分配绝对偏移量
+            // 根据默认时间策略和这批次消息里时间戳最大的消息的时间戳生成最大时间戳和偏移量，并保存在 maxTimestamp 和 shallowOffsetOfMaxTimestamp 中
             LogValidator.validateMessagesAndAssignOffsets(validRecords,
               topicPartition,
               offset,   // 起始偏移量
               time,
-              now,
+              now,      // 当前时间
               appendInfo.sourceCodec,
               appendInfo.targetCodec,
               config.compact,
               config.messageFormatVersion.recordVersion.value,
-              config.messageTimestampType,
-              config.messageTimestampDifferenceMaxMs,
+              config.messageTimestampType,             // 时间类型，默认是消息创建时间
+              config.messageTimestampDifferenceMaxMs,  // 表示当前时间和消息里的时间允许的最大时间差，仅在时间类型为 CREATE_TIME 有效，默认是 Long.MAX_VALUE
               leaderEpoch,
               origin,
               interBrokerProtocolVersion,
@@ -1148,7 +1150,9 @@ class Log(@volatile private var _dir: File,
           }
           // 3）获取合法数据
           validRecords = validateAndOffsetAssignResult.validatedRecords
+          // 消息的最大时间戳
           appendInfo.maxTimestamp = validateAndOffsetAssignResult.maxTimestamp
+          // 消息的最大偏移量
           appendInfo.offsetOfMaxTimestamp = validateAndOffsetAssignResult.shallowOffsetOfMaxTimestamp
           appendInfo.lastOffset = offset.value - 1
           appendInfo.recordConversionStats = validateAndOffsetAssignResult.recordConversionStats
@@ -1239,8 +1243,8 @@ class Log(@volatile private var _dir: File,
 
         // 5) 把数据写入到 segment
         segment.append(largestOffset = appendInfo.lastOffset,
-          largestTimestamp = appendInfo.maxTimestamp,
-          shallowOffsetOfMaxTimestamp = appendInfo.offsetOfMaxTimestamp,
+          largestTimestamp = appendInfo.maxTimestamp,                      // 消息批的最大时间戳
+          shallowOffsetOfMaxTimestamp = appendInfo.offsetOfMaxTimestamp,   // 消息批的最大偏移量
           records = validRecords)
 
         // Increment the log end offset. We do this immediately after the append because a
@@ -1484,6 +1488,7 @@ class Log(@volatile private var _dir: File,
     // config.compressionType = producer
     val targetCodec = BrokerCompressionCodec.getTargetCompressionCodec(config.compressionType, sourceCodec)
     // 返回日志追加对象，它里面是不包含具体消息内容
+    // 没有处理时间相关信息
     LogAppendInfo(firstOffset, lastOffset, maxTimestamp, offsetOfMaxTimestamp, RecordBatch.NO_TIMESTAMP, logStartOffset,
       RecordConversionStats.EMPTY, sourceCodec, targetCodec, shallowMessageCount, validBytesCount, monotonic, lastOffsetOfFirstBatch)
   }
@@ -2056,6 +2061,7 @@ class Log(@volatile private var _dir: File,
         updateLogEndOffset(nextOffsetMetadata.messageOffset)
 
         // schedule an asynchronous flush of the old segment
+        // 刷盘（recoveryPoint -> newOffset）这个区间的消息
         scheduler.schedule("flush-log", () => flush(newOffset), delay = 0L)
 
         info(s"Rolled new log segment at offset $newOffset in ${time.hiResClockMs() - start} ms.")

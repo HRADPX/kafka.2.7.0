@@ -126,6 +126,7 @@ abstract class AbstractFetcherManager[T <: AbstractFetcherThread](val name: Stri
                                    brokerIdAndFetcherId: BrokerIdAndFetcherId): T = {
         val fetcherThread = createFetcherThread(brokerAndFetcherId.fetcherId, brokerAndFetcherId.broker)
         fetcherThreadMap.put(brokerIdAndFetcherId, fetcherThread)
+        // 启动线程，备份副本开始同步主副本数据
         fetcherThread.start()
         fetcherThread
       }
@@ -134,6 +135,7 @@ abstract class AbstractFetcherManager[T <: AbstractFetcherThread](val name: Stri
       for ((brokerAndFetcherId, initialFetchOffsets) <- partitionsPerFetcher) {
         val brokerIdAndFetcherId = BrokerIdAndFetcherId(brokerAndFetcherId.broker.id, brokerAndFetcherId.fetcherId)
         val fetcherThread = fetcherThreadMap.get(brokerIdAndFetcherId) match {
+            // broker 没有发生变化，复用原有的线程
           case Some(currentFetcherThread) if currentFetcherThread.sourceBroker == brokerAndFetcherId.broker =>
             // reuse the fetcher thread
             currentFetcherThread

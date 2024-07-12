@@ -243,3 +243,64 @@ Apache Kafka is interested in building the community; we would welcome any thoug
 
 To contribute follow the instructions here:
  * https://kafka.apache.org/contributing.html
+
+
+Kafka 参数
+  配置文件放在 Kafka 目录下的 config 目录中，主要是 server.properties 文件。
+
+1.常规
+  zookeeper.connect: zookeeper 集群地址，可以是多个，用逗号分开（一组 hostname/path 列表， hostname 是 zk 的机器名或 IP，port 是 zk 的端口，/path 是可选的 zk 的路径，如果不指定，默认是根路径）
+  log.dirs: Kafka 把所有消息都保存在磁盘上，存放这些数据的目录通过 log.dirs 指定，可以使用多路径，使用逗号分隔。如果是多路径，Kafka 会根据 "最少使用" 原则，把同一个分区的日志片段保存在同一个路径下，会往拥有最少数据分区的路径新增分区。
+
+
+
+2.生产者
+ 已发送但是没有接收响应的请求数量，默认是 5
+ 消息发送等待的最大时间
+ 消息失败重试的最大等待时间，默认是 100ms
+
+ message.max.bytes:
+ max.message.bytes:
+
+
+3.broker
+  auto.create.topic.enable: 是否允许自动创建主题。如果设为 true，那么生产者、消费者、请求元数据时发现主题不存在时，就会自动创建。
+  delete.topic.enable: 删除主题配置，默认 true
+  num.recovery.threads.per.data.dir: 每个数据目录用于日志恢复启动和关闭的线程数量。因为这些线程只是服务器启动（正常启动和崩溃重启）和关闭时会用到，所以完全可以设置大量的线程来达到并行的目的。注意，这个参数指的是每个日志目录的线程数。
+  replica.lag.time.max.ms: 备份副本没有发送任何获取请求或者至少这次没有消耗到主副本日志结束偏移量
+
+
+
+主题配置
+  num.partitions: 每个新建主题的分区个数，只能增加不能减少。
+  log.retention.hours: 日志保存时间，默认为 7 天。超过这个时间会清理数据。bytes 和 minutes 无论哪个先达到都会触发，与此类似还有 log.retention.minutes 和 log.retention.ms，如果都设置的话，优先使用具有最小值的那个。（提示：时间保留数据是通过检查磁盘上日志文件的最后修改时间来实现的，也就是最后修改时间是日志片段的关闭时间，也就是文件里最后一个消息的时间戳）
+  log.retention.bytes: topic 每个分区的最大文件大小，一个 topic 的大小限制 = 分区数 * log.retention.bytes。-1 表示没有大小限制。log.retention.minutes 和 log.retention.bytes 任意一个达到要求，都会执行删除。如果是 log.retention.bytes 先达到了，则是删除多出来的部分数据，一般不推荐使用最大文件删除策略，而是推荐文件过期删除策略。
+  log.segment.bytes: 分区的日志是存储在某个目录下的多个文件中的，这些文件将分区的日志切分成一段一段的，称为日志片段，这个属性就是日志片段的大小，默认是 1G。当日志片段到达这个大小后，就会关闭当前文件，并创建一个新的日志分段，被关闭的文件就开始等待过期。
+  如果一个主题每天只接受 100MB 的数据，那么根据默认设置，需要 10 天才能填满一个文件，而且因为日志片段在关闭之前，消息是不会过期的，所以如果 log.retention.hours 保持默认值的话，那么这个日志片段需要 17 天才过期。
+  message.max.bytes: 表示一个服务器能够接收处理的消息的最大字节数，注意这个值生产者和消费者必须设置一致，且不要太于 fetch.message.max.bytes 属性的值（消费者能读取的最大消息，这个值应该大于等于 message.max.bytes）。该值的默认值是 1000000 字节，大概 900KB～1MB。如果启动压缩，判断压缩后的值。这个值的大小对性能影响很大，值越大，网络的IO的时间越长，还会增加磁盘写入的大小。
+  Kafka 设计的初衷是迅速处理短小的消息，一般 10K 大小的消息吞吐性能最好。
+
+
+
+4.消费者
+  session.timeout.ms: 消费者向服务端发送心跳的最大间隔，默认是 10s，如果超过这个时间间隔，协调者会将消费者移除消费组，并触发一次 rebalance。
+  heartbeat.interval.ms: 消费者心跳间隔，默认3s。
+  rebalance.timeout.ms: rebalance 开始后，每个消费者加入消费组的最大允许时间。默认是60s，
+  max.poll.interval.ms:当使用消费组管理时两次调用 poll 方法的最大间隔，这个参数设置了消费者消费消息的最大空闲时间。如果超过这个时间，消费者将被视为消息失败，并触发 rebalance。
+  fetch.min.bytes: 消费者一次拉取请求拉取的最小字节数，如果数据不足，请求会等待直到有足够多的数据量。默认1字节，表示只要有1个字节数据可用或请求在等待数据达到超时，就会立即返回。设置这个值大于1可以稍微提高服务器的吞吐，但是会带来一定的延迟。
+  fetch.max.bytes: 消费者一次拉取请求拉取的最大字节数，消费者也是按照批次拉取消息的，如果某个分区的一个记录批次超过这个值，也会返回以确保消费者能够正常消费。所以这个值不是一个绝对的。
+
+
+疑问：
+（1）Kafka 主副本在备份副本拉取到数据后就更新主副本里维护的远程副本的 LEO，如果这个时候主副本返回备份副本的数据失败了，这个时候备份副本的 LEO 和主副本维护的 LEO 就不一致了？
+
+
+
+
+
+
+
+
+
+
+

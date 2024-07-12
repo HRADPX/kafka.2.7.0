@@ -158,6 +158,7 @@ public class CommonClientConfigs {
                                                         + "must be in the allowable range as configured in the broker configuration by <code>group.min.session.timeout.ms</code> "
                                                         + "and <code>group.max.session.timeout.ms</code>.";
 
+    // 心跳时间间隔，默认3s
     public static final String HEARTBEAT_INTERVAL_MS_CONFIG = "heartbeat.interval.ms";
     public static final String HEARTBEAT_INTERVAL_MS_DOC = "The expected time between heartbeats to the consumer "
                                                            + "coordinator when using Kafka's group management facilities. Heartbeats are used to ensure that the "

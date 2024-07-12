@@ -339,7 +339,12 @@ public abstract class AbstractCoordinator implements Closeable {
      * @throws RuntimeException for unexpected errors raised from the heartbeat thread
      */
     protected synchronized void pollHeartbeat(long now) {
+        // 什么情况下 heartbeatThread != null 呢？
+        // 消费组发生了 re-balance，如消费者的加入/离开，心跳超时，分区变化等
+        // Note: 在 0.10.0 以下的低版本，poll 和周期性心跳是耦合在一起的，如果 poll 方法执行时间过长，消费者无法发送心跳超时后也会触发 re-balance，
+        // 后续版本将 poll 和心跳解耦，心跳由一个后台线程（HeartbeatThread）来单独维护，所以不存在上面的问题。
         if (heartbeatThread != null) {
+            // 失败
             if (heartbeatThread.hasFailed()) {
                 // set the heartbeat thread to null and raise an exception. If the user catches it,
                 // the next call to ensureActiveGroup() will spawn a new heartbeat thread.
@@ -351,6 +356,8 @@ public abstract class AbstractCoordinator implements Closeable {
             if (heartbeat.shouldHeartbeat(now)) {
                 notify();
             }
+            // 正常开始消费时，这里每次调用记录下 poll 方法调用的时间
+            // poll 方法超时校验的逻辑放在了心跳里
             heartbeat.poll(now);
         }
     }
@@ -600,7 +607,7 @@ public abstract class AbstractCoordinator implements Closeable {
         JoinGroupRequest.Builder requestBuilder = new JoinGroupRequest.Builder(
                 new JoinGroupRequestData()
                         .setGroupId(rebalanceConfig.groupId)
-                        .setSessionTimeoutMs(this.rebalanceConfig.sessionTimeoutMs)
+                        .setSessionTimeoutMs(this.rebalanceConfig.sessionTimeoutMs)   // 心跳超时时间...默认10s，todo huangran 看下这个参数在服务端怎么用
                         .setMemberId(this.generation.memberId)  // 首次加入时是消费者的编号是 UNKNOWN_MEMBER_ID
                         .setGroupInstanceId(this.rebalanceConfig.groupInstanceId.orElse(null))
                         .setProtocolType(protocolType())
@@ -1499,11 +1506,14 @@ public abstract class AbstractCoordinator implements Closeable {
                             // the session timeout has expired without seeing a successful heartbeat, so we should
                             // probably make sure the coordinator is still healthy.
                             // 长时间没有收到心跳，需要重新找新的 coordinator 并且将之前的连接断开....
+                            // 这会导致协调者节点不可用（this.coordinator = null），触发 re-balance 机制
                             markCoordinatorUnknown("session timed out without receiving a "
                                     + "heartbeat response");
                         } else if (heartbeat.pollTimeoutExpired(now)) {
                             // the poll timeout has expired, which means that the foreground thread has stalled
                             // in between calls to poll().
+                            // 判断 poll 方法是否超时，两次调用 poll 方法时间过长，超过默认配置的最大时间（默认300s），触发 rebalance
+                            // 解决：调大 max.poll.interval.ms，或者减少 max.poll.records 的值，表示一次 poll 方法消费的消息数量
                             String leaveReason = "consumer poll timeout has expired. This means the time between subsequent calls to poll() " +
                                                     "was longer than the configured max.poll.interval.ms, which typically implies that " +
                                                     "the poll loop is spending too much time processing messages. " +
